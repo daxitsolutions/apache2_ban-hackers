@@ -21,6 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SAFE_IPS_FILE="$SCRIPT_DIR/safe-ips.txt"
 TRACK_LOG="/var/log/ban-path-explorer.log"
 BAN_STATE_FILE="/var/log/ban-path-explorer.state"
+LOCK_DIR_BASE="/tmp/ban-path-explorer.lock"
 
 DEFAULT_LOG_DIR="/var/log/apache2"
 DEFAULT_THRESHOLD="20"
@@ -29,6 +30,8 @@ DEFAULT_BAN_DURATION_MINUTES="60"
 DEFAULT_IGNORE_PATHS=""
 DEFAULT_QUIET="0"
 DEFAULT_BAN="0"
+DEFAULT_MAX_LOG_LINES="20000"
+DEFAULT_MAX_EVENTS="200000"
 
 LOG_DIR="$DEFAULT_LOG_DIR"
 LOG_FILES_RAW=""
@@ -38,6 +41,9 @@ BAN_DURATION_MINUTES="$DEFAULT_BAN_DURATION_MINUTES"
 IGNORE_PATHS_RAW="$DEFAULT_IGNORE_PATHS"
 QUIET="$DEFAULT_QUIET"
 BAN_ENABLED="$DEFAULT_BAN"
+MAX_LOG_LINES="$DEFAULT_MAX_LOG_LINES"
+MAX_EVENTS="$DEFAULT_MAX_EVENTS"
+LOCK_DIR="$LOCK_DIR_BASE"
 
 WINDOW_SECONDS="0"
 BAN_DURATION_SECONDS="0"
@@ -50,6 +56,8 @@ declare -A BEST_START=()
 declare -A BEST_END=()
 declare -A BEST_PATHS=()
 declare -A BEST_TOTAL_EVENTS=()
+declare -A TS_CACHE=()
+RUNNING_PID=""
 
 print_usage() {
   cat <<EOF
@@ -63,6 +71,9 @@ Options:
   --log-files "F1 F2 ..."  Liste de fichiers logs séparés par des espaces
   --threshold N            Seuil d'URLs différentes par IP (défaut: $DEFAULT_THRESHOLD)
   --window MIN             Fenêtre glissante en minutes (défaut: $DEFAULT_WINDOW_MINUTES)
+  --max-log-lines N        Max lignes lues par fichier log (défaut: $DEFAULT_MAX_LOG_LINES)
+  --max-events N           Max événements traités par exécution (défaut: $DEFAULT_MAX_EVENTS)
+  --lock-dir DIR           Verrou d'exécution unique (défaut: $LOCK_DIR_BASE)
   --ignore-paths "a,b,c"   Ignore les chemins contenant ces motifs
   --ban                    Active le blocage IPTables
   --ban-duration MIN       Durée de blocage en minutes (défaut: $DEFAULT_BAN_DURATION_MINUTES)
@@ -207,36 +218,95 @@ build_log_files_list() {
 
 parse_logs_to_tmp() {
   local out_file="$1"
-  awk '
-    /\[error\]/ && (/File does not exist: / || /AH01276:/) {
-      ts="";
-      ip="";
-      path="";
-      if (match($0, /^\[([0-9]{2}\/[A-Za-z]{3}\/[0-9]{4}:[0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4})\]/, t)) {
-        ts=t[1];
-      } else {
-        next;
+  local f
+  : > "$out_file"
+  for f in "${LOG_FILES[@]}"; do
+    awk -v max="$MAX_LOG_LINES" '
+      {
+        buf[NR % max] = $0
       }
-      if (match($0, /\[client ([^] ]+)\]/, c)) {
-        ip=c[1];
-      } else {
-        next;
-      }
-      pos=index($0, "File does not exist: ");
-      if (pos > 0) {
-        path=substr($0, pos + length("File does not exist: "));
-      } else {
-        pos2=index($0, "AH01276:");
-        if (pos2 > 0) {
-          path=substr($0, pos2 + length("AH01276:"));
-          sub(/^[[:space:]]+/, "", path);
-        } else {
-          next;
+      END {
+        start = (NR > max) ? NR - max + 1 : 1
+        i = start
+        while (i <= NR) {
+          line = buf[i % max]
+          if (line ~ /\[error\]/ && (line ~ /File does not exist: / || line ~ /AH01276:/)) {
+            ts=""
+            ip=""
+            path=""
+            if (match(line, /^\[([0-9]{2}\/[A-Za-z]{3}\/[0-9]{4}:[0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4})\]/, t)) {
+              ts=t[1]
+            } else {
+              i++
+              continue
+            }
+            if (match(line, /\[client ([^] ]+)\]/, c)) {
+              ip=c[1]
+            } else {
+              i++
+              continue
+            }
+            pos=index(line, "File does not exist: ")
+            if (pos > 0) {
+              path=substr(line, pos + length("File does not exist: "))
+            } else {
+              pos2=index(line, "AH01276:")
+              if (pos2 > 0) {
+                path=substr(line, pos2 + length("AH01276:"))
+                sub(/^[[:space:]]+/, "", path)
+              } else {
+                i++
+                continue
+              }
+            }
+            print ts "\t" ip "\t" path "\t" FILENAME
+          }
+          i++
         }
       }
-      print ts "\t" ip "\t" path "\t" FILENAME;
-    }
-  ' "${LOG_FILES[@]}" > "$out_file"
+    ' "$f" >> "$out_file"
+  done
+}
+
+acquire_lock() {
+  local pid_file pid_value cmdline
+  pid_file="$LOCK_DIR/pid"
+  if mkdir "$LOCK_DIR" >/dev/null 2>&1; then
+    printf '%s\n' "$$" > "$pid_file" 2>/dev/null || true
+    return 0
+  fi
+  if [ -f "$pid_file" ]; then
+    pid_value="$(cat "$pid_file" 2>/dev/null || echo "")"
+    if is_uint "$pid_value" && kill -0 "$pid_value" >/dev/null 2>&1; then
+      cmdline="$(cat "/proc/$pid_value/cmdline" 2>/dev/null || echo "")"
+      case "$cmdline" in
+        *"$SCRIPT_NAME"*)
+          RUNNING_PID="$pid_value"
+          return 1
+          ;;
+      esac
+    fi
+  fi
+  rm -f "$pid_file" >/dev/null 2>&1 || true
+  rmdir "$LOCK_DIR" >/dev/null 2>&1 || true
+  if mkdir "$LOCK_DIR" >/dev/null 2>&1; then
+    printf '%s\n' "$$" > "$pid_file" 2>/dev/null || true
+    return 0
+  fi
+  if [ -f "$pid_file" ]; then
+    pid_value="$(cat "$pid_file" 2>/dev/null || echo "")"
+    if is_uint "$pid_value"; then
+      RUNNING_PID="$pid_value"
+    fi
+  fi
+  return 1
+}
+
+release_lock() {
+  if [ -d "$LOCK_DIR" ]; then
+    rm -f "$LOCK_DIR/pid" >/dev/null 2>&1 || true
+    rmdir "$LOCK_DIR" >/dev/null 2>&1 || true
+  fi
 }
 
 cleanup_expired_bans() {
@@ -334,6 +404,7 @@ main() {
   local old_path
   local action_line
   local expiry_now
+  local capped_events=0
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -370,6 +441,21 @@ main() {
         [ $# -gt 0 ] || { printf 'Option --ignore-paths invalide\n' >&2; exit 1; }
         IGNORE_PATHS_RAW="$1"
         ;;
+      --max-log-lines)
+        shift
+        [ $# -gt 0 ] || { printf 'Option --max-log-lines invalide\n' >&2; exit 1; }
+        MAX_LOG_LINES="$1"
+        ;;
+      --max-events)
+        shift
+        [ $# -gt 0 ] || { printf 'Option --max-events invalide\n' >&2; exit 1; }
+        MAX_EVENTS="$1"
+        ;;
+      --lock-dir)
+        shift
+        [ $# -gt 0 ] || { printf 'Option --lock-dir invalide\n' >&2; exit 1; }
+        LOCK_DIR="$1"
+        ;;
       --quiet)
         QUIET=1
         ;;
@@ -398,6 +484,14 @@ main() {
     printf 'Erreur: --ban-duration doit être un entier positif\n' >&2
     exit 1
   fi
+  if ! is_uint "$MAX_LOG_LINES" || [ "$MAX_LOG_LINES" -eq 0 ]; then
+    printf 'Erreur: --max-log-lines doit être un entier positif\n' >&2
+    exit 1
+  fi
+  if ! is_uint "$MAX_EVENTS" || [ "$MAX_EVENTS" -eq 0 ]; then
+    printf 'Erreur: --max-events doit être un entier positif\n' >&2
+    exit 1
+  fi
 
   WINDOW_SECONDS=$((WINDOW_MINUTES * 60))
   BAN_DURATION_SECONDS=$((BAN_DURATION_MINUTES * 60))
@@ -411,6 +505,17 @@ main() {
     printf 'Erreur: fichier whitelist introuvable: %s\n' "$SAFE_IPS_FILE" >&2
     exit 1
   fi
+  if ! acquire_lock; then
+    if [ -n "$RUNNING_PID" ]; then
+      log_track "Exécution ignorée: instance déjà en cours (PID=$RUNNING_PID, lock=$LOCK_DIR)"
+      printf 'Erreur: une exécution est déjà en cours (PID=%s)\n' "$RUNNING_PID" >&2
+    else
+      log_track "Exécution ignorée: verrou déjà présent ($LOCK_DIR)"
+      printf 'Erreur: une exécution est déjà en cours (%s)\n' "$LOCK_DIR" >&2
+    fi
+    exit 1
+  fi
+  trap 'release_lock' EXIT INT TERM
 
   load_safe_ips
   parse_ignore_paths
@@ -422,7 +527,7 @@ main() {
   say "Analysé : $analyzed_count fichiers error*.log"
   say "Fenêtre : $WINDOW_MINUTES minutes | Seuil : $THRESHOLD URLs différentes"
 
-  log_track "Démarrage v$VERSION | log-dir=$LOG_DIR | files=\"$LOG_FILES_RAW\" | threshold=$THRESHOLD | window=$WINDOW_MINUTES | ban=$BAN_ENABLED | ban-duration=$BAN_DURATION_MINUTES | quiet=$QUIET | ignore=\"$IGNORE_PATHS_RAW\""
+  log_track "Démarrage v$VERSION | log-dir=$LOG_DIR | files=\"$LOG_FILES_RAW\" | threshold=$THRESHOLD | window=$WINDOW_MINUTES | ban=$BAN_ENABLED | ban-duration=$BAN_DURATION_MINUTES | quiet=$QUIET | ignore=\"$IGNORE_PATHS_RAW\" | max-log-lines=$MAX_LOG_LINES | max-events=$MAX_EVENTS | lock-dir=$LOCK_DIR"
 
   if [ "$analyzed_count" -eq 0 ]; then
     log_track "Aucun fichier log trouvé"
@@ -459,16 +564,29 @@ main() {
       continue
     fi
 
-    unix_ts="$(apache_to_unix_ts "$line_ts")"
+    if [ -n "${TS_CACHE[$line_ts]+x}" ]; then
+      unix_ts="${TS_CACHE[$line_ts]}"
+    else
+      unix_ts="$(apache_to_unix_ts "$line_ts")"
+      if [ -n "$unix_ts" ] && is_uint "$unix_ts"; then
+        TS_CACHE["$line_ts"]="$unix_ts"
+      fi
+    fi
     [ -z "$unix_ts" ] && continue
     if ! is_uint "$unix_ts"; then
       continue
     fi
     printf '%s|%s|%s\n' "$line_ip" "$unix_ts" "$line_path" >> "$tmp_events"
     total_records=$((total_records + 1))
+    if [ "$total_records" -ge "$MAX_EVENTS" ]; then
+      capped_events=1
+      break
+    fi
   done < "$tmp_parsed"
 
-  sort -t'|' -k1,1 -k2,2n "$tmp_events" > "$tmp_sorted"
+  if [ -s "$tmp_events" ]; then
+    sort -t'|' -k1,1 -k2,2n "$tmp_events" > "$tmp_sorted"
+  fi
 
   declare -a WINDOW_TS=()
   declare -a WINDOW_PATHS=()
@@ -585,6 +703,10 @@ main() {
   if [ "$suspect_count" -eq 0 ]; then
     say "Aucune IP suspecte détectée"
     log_track "Aucune IP suspecte détectée | lignes_utiles=$total_records"
+  fi
+  if [ "$capped_events" -eq 1 ]; then
+    say "Limite atteinte : $MAX_EVENTS événements traités"
+    log_track "Limite atteinte: max-events=$MAX_EVENTS"
   fi
 
   if [ "$BAN_ENABLED" -eq 0 ]; then

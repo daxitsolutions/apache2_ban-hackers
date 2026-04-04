@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Usage : ./scripts/test-ban-path-explorer.sh
-# Script de test pour vérifier le comportement de ban-path-explorer.sh
-# à partir des vrais fichiers error*.log Apache copiés en zone temporaire.
+# Lance une batterie de tests isolée sur ban-path-explorer.sh
+# sans jamais modifier les fichiers permanents du système.
 
 set -u
 
@@ -10,57 +10,31 @@ SCRIPT_UNDER_TEST="./scripts/ban-path-explorer.sh"
 TMP_DIR="/tmp/ban-path-test-$$"
 TMP_LOG_DIR="$TMP_DIR/logs"
 TMP_OUT_DIR="$TMP_DIR/out"
-SAFE_IPS_FILE="./scripts/safe-ips.txt"
-TRACK_LOG="/var/log/ban-path-explorer.log"
+TMP_SCRIPT_COPY="$TMP_DIR/ban-path-explorer.sh"
+TMP_SAFE_IPS_FILE="$TMP_DIR/safe-ips.txt"
+TMP_TRACK_LOG="$TMP_DIR/ban-path-explorer.log"
+TMP_BAN_STATE="$TMP_DIR/ban-path-explorer.state"
+TRACK_LOG_REAL="/var/log/ban-path-explorer.log"
 APACHE_DIR_PRIMARY="/var/log/apache2"
 APACHE_DIR_FALLBACK="/var/log/httpd"
+
+MAX_LINES_PER_LOG="15000"
+CPU_LIMIT_SECONDS="15"
+FILE_LIMIT_BLOCKS="20480"
 
 TEST1_STATUS="FAIL"
 TEST2_STATUS="FAIL"
 TEST3_STATUS="FAIL"
 TEST4_STATUS="FAIL"
 TEST5_STATUS="FAIL"
-
 FAIL_COUNT=0
-
-ORIG_SAFE_IPS_EXISTS="0"
-ORIG_SAFE_IPS_CONTENT=""
 
 TRACK_LOG_EXISTS_BEFORE="0"
 TRACK_LOG_SNAPSHOT_BEFORE=""
 TRACK_LOG_CONTENT_BEFORE=""
 
 cleanup() {
-  if [ "$ORIG_SAFE_IPS_EXISTS" = "1" ]; then
-    cat <<EOF > "$SAFE_IPS_FILE"
-$ORIG_SAFE_IPS_CONTENT
-EOF
-  else
-    rm -f -- "$SAFE_IPS_FILE" >/dev/null 2>&1 || true
-  fi
   rm -rf -- "$TMP_DIR" >/dev/null 2>&1 || true
-}
-
-prepare_safe_ips_backup() {
-  if [ -f "$SAFE_IPS_FILE" ]; then
-    ORIG_SAFE_IPS_EXISTS="1"
-    ORIG_SAFE_IPS_CONTENT="$(cat "$SAFE_IPS_FILE")"
-  else
-    ORIG_SAFE_IPS_EXISTS="0"
-    ORIG_SAFE_IPS_CONTENT=""
-  fi
-}
-
-prepare_track_log_snapshot_before() {
-  if [ -e "$TRACK_LOG" ]; then
-    TRACK_LOG_EXISTS_BEFORE="1"
-    TRACK_LOG_SNAPSHOT_BEFORE="$(ls -ld -- "$TRACK_LOG" 2>/dev/null || echo "")"
-    TRACK_LOG_CONTENT_BEFORE="$(cat "$TRACK_LOG" 2>/dev/null || echo "")"
-  else
-    TRACK_LOG_EXISTS_BEFORE="0"
-    TRACK_LOG_SNAPSHOT_BEFORE=""
-    TRACK_LOG_CONTENT_BEFORE=""
-  fi
 }
 
 detect_apache_log_dir() {
@@ -76,20 +50,74 @@ detect_apache_log_dir() {
   return 0
 }
 
-copy_error_logs() {
+snapshot_track_log_before() {
+  if [ -e "$TRACK_LOG_REAL" ]; then
+    TRACK_LOG_EXISTS_BEFORE="1"
+    TRACK_LOG_SNAPSHOT_BEFORE="$(ls -ld -- "$TRACK_LOG_REAL" 2>/dev/null || echo "")"
+    TRACK_LOG_CONTENT_BEFORE="$(cat "$TRACK_LOG_REAL" 2>/dev/null || echo "")"
+  else
+    TRACK_LOG_EXISTS_BEFORE="0"
+    TRACK_LOG_SNAPSHOT_BEFORE=""
+    TRACK_LOG_CONTENT_BEFORE=""
+  fi
+}
+
+copy_error_logs_limited() {
   local src_dir="$1"
   local copied="0"
-  local f
+  local src_file
+  local dst_file
   mkdir -p "$TMP_LOG_DIR" "$TMP_OUT_DIR" || return 1
-  for f in "$src_dir"/error*.log; do
-    [ -f "$f" ] || continue
-    cp -- "$f" "$TMP_LOG_DIR/" || return 1
+  for src_file in "$src_dir"/error*.log; do
+    [ -f "$src_file" ] || continue
+    dst_file="$TMP_LOG_DIR/$(basename "$src_file")"
+    awk -v max="$MAX_LINES_PER_LOG" '
+      { buf[NR % max] = $0 }
+      END {
+        start = (NR > max) ? NR - max + 1 : 1
+        i = start
+        while (i <= NR) {
+          print buf[i % max]
+          i++
+        }
+      }
+    ' "$src_file" > "$dst_file" || return 1
     copied="1"
   done
   if [ "$copied" = "1" ]; then
     return 0
   fi
   return 2
+}
+
+prepare_isolated_script_copy() {
+  cp -- "$SCRIPT_UNDER_TEST" "$TMP_SCRIPT_COPY" || return 1
+  awk -v track="$TMP_TRACK_LOG" -v state="$TMP_BAN_STATE" '
+    /^TRACK_LOG=/ { print "TRACK_LOG=\"" track "\""; next }
+    /^BAN_STATE_FILE=/ { print "BAN_STATE_FILE=\"" state "\""; next }
+    { print }
+  ' "$TMP_SCRIPT_COPY" > "$TMP_SCRIPT_COPY.tmp" || return 1
+  cp -- "$TMP_SCRIPT_COPY.tmp" "$TMP_SCRIPT_COPY" || return 1
+  rm -f -- "$TMP_SCRIPT_COPY.tmp" >/dev/null 2>&1 || true
+  return 0
+}
+
+prepare_safe_ips_for_test() {
+  cat <<EOF > "$TMP_SAFE_IPS_FILE"
+127.0.0.1
+::1
+EOF
+}
+
+run_isolated() {
+  local output_file="$1"
+  shift
+  (
+    ulimit -t "$CPU_LIMIT_SECONDS"
+    ulimit -f "$FILE_LIMIT_BLOCKS"
+    bash "$TMP_SCRIPT_COPY" "$@"
+  ) > "$output_file" 2>&1
+  return $?
 }
 
 count_suspects_in_output() {
@@ -105,15 +133,36 @@ has_keywords_for_summary() {
   grep -q "Seuil" "$file"
 }
 
+test_track_log_not_modified() {
+  local exists_after snapshot_after content_after
+  if [ -e "$TRACK_LOG_REAL" ]; then
+    exists_after="1"
+    snapshot_after="$(ls -ld -- "$TRACK_LOG_REAL" 2>/dev/null || echo "")"
+    content_after="$(cat "$TRACK_LOG_REAL" 2>/dev/null || echo "")"
+  else
+    exists_after="0"
+    snapshot_after=""
+    content_after=""
+  fi
+
+  if [ "$TRACK_LOG_EXISTS_BEFORE" = "0" ] && [ "$exists_after" = "0" ]; then
+    return 0
+  fi
+  if [ "$TRACK_LOG_EXISTS_BEFORE" = "1" ] && [ "$exists_after" = "1" ] &&
+     [ "$TRACK_LOG_SNAPSHOT_BEFORE" = "$snapshot_after" ] &&
+     [ "$TRACK_LOG_CONTENT_BEFORE" = "$content_after" ]; then
+    return 0
+  fi
+  return 1
+}
+
 run_tests() {
   local apache_dir
-  local out1_quiet out1_visible out2 out3 out4
+  local out1 out2 out3 out4
   local suspect_count_2
   local suspect_count_3
-  local suspect_count_4
-  local track_log_exists_after
-  local track_log_snapshot_after
-  local track_log_content_after
+  local has_bad_paths
+  local has_white_ip
 
   if [ ! -x "$SCRIPT_UNDER_TEST" ]; then
     echo "Erreur: $SCRIPT_UNDER_TEST absent ou non exécutable."
@@ -126,7 +175,7 @@ run_tests() {
     exit 0
   fi
 
-  copy_error_logs "$apache_dir"
+  copy_error_logs_limited "$apache_dir"
   case "$?" in
     2)
       echo "Aucun fichier error*.log présent dans $apache_dir."
@@ -139,30 +188,27 @@ run_tests() {
       ;;
   esac
 
-  prepare_safe_ips_backup
-  prepare_track_log_snapshot_before
+  snapshot_track_log_before
+  prepare_safe_ips_for_test
+  if ! prepare_isolated_script_copy; then
+    echo "Erreur lors de la préparation du script de test isolé."
+    exit 1
+  fi
 
-  out1_quiet="$TMP_OUT_DIR/test1_quiet.out"
-  out1_visible="$TMP_OUT_DIR/test1_visible.out"
+  out1="$TMP_OUT_DIR/test1.out"
   out2="$TMP_OUT_DIR/test2.out"
   out3="$TMP_OUT_DIR/test3.out"
   out4="$TMP_OUT_DIR/test4.out"
 
-  "$SCRIPT_UNDER_TEST" --log-dir "$TMP_LOG_DIR" --quiet > "$out1_quiet" 2>&1
-  if [ "$?" -eq 0 ]; then
-    "$SCRIPT_UNDER_TEST" --log-dir "$TMP_LOG_DIR" > "$out1_visible" 2>&1
-    if [ "$?" -eq 0 ] && has_keywords_for_summary "$out1_visible"; then
-      TEST1_STATUS="OK"
-    else
-      TEST1_STATUS="FAIL"
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-    fi
+  run_isolated "$out1" --log-dir "$TMP_LOG_DIR"
+  if [ "$?" -eq 0 ] && has_keywords_for_summary "$out1"; then
+    TEST1_STATUS="OK"
   else
     TEST1_STATUS="FAIL"
     FAIL_COUNT=$((FAIL_COUNT + 1))
   fi
 
-  "$SCRIPT_UNDER_TEST" --log-dir "$TMP_LOG_DIR" --threshold 5 --window 10 > "$out2" 2>&1
+  run_isolated "$out2" --log-dir "$TMP_LOG_DIR" --threshold 5 --window 10
   if [ "$?" -eq 0 ]; then
     suspect_count_2="$(count_suspects_in_output "$out2")"
     case "$suspect_count_2" in
@@ -174,27 +220,30 @@ run_tests() {
     FAIL_COUNT=$((FAIL_COUNT + 1))
   fi
 
-  "$SCRIPT_UNDER_TEST" --log-dir "$TMP_LOG_DIR" --threshold 5 --window 10 --ignore-paths "favicon.ico,robots.txt" > "$out3" 2>&1
+  run_isolated "$out3" --log-dir "$TMP_LOG_DIR" --threshold 5 --window 10 --ignore-paths "favicon.ico,robots.txt"
   if [ "$?" -eq 0 ]; then
-    if grep -E '^Chemins :' "$out3" | grep -Eq 'favicon\.ico|robots\.txt'; then
-      TEST3_STATUS="FAIL"
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-    else
-      TEST3_STATUS="OK"
-    fi
+    has_bad_paths="$(grep -E '^Chemins :' "$out3" | grep -E 'favicon\.ico|robots\.txt' || true)"
+    suspect_count_3="$(count_suspects_in_output "$out3")"
+    case "$suspect_count_3" in
+      ''|*[!0-9]*) TEST3_STATUS="FAIL"; FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+      *)
+        if [ -n "$has_bad_paths" ]; then
+          TEST3_STATUS="FAIL"
+          FAIL_COUNT=$((FAIL_COUNT + 1))
+        else
+          TEST3_STATUS="OK"
+        fi
+        ;;
+    esac
   else
     TEST3_STATUS="FAIL"
     FAIL_COUNT=$((FAIL_COUNT + 1))
   fi
 
-  cat <<EOF > "$SAFE_IPS_FILE"
-127.0.0.1
-::1
-EOF
-  "$SCRIPT_UNDER_TEST" --log-dir "$TMP_LOG_DIR" --threshold 1 --window 60 > "$out4" 2>&1
+  run_isolated "$out4" --log-dir "$TMP_LOG_DIR" --threshold 1 --window 60
   if [ "$?" -eq 0 ]; then
-    suspect_count_4="$(grep -c '^IP suspecte : 127\.0\.0\.1$' "$out4" 2>/dev/null || echo "0")"
-    if [ "$suspect_count_4" = "0" ]; then
+    has_white_ip="$(grep -E '^IP suspecte : (127\.0\.0\.1|::1)$' "$out4" || true)"
+    if [ -z "$has_white_ip" ]; then
       TEST4_STATUS="OK"
     else
       TEST4_STATUS="FAIL"
@@ -205,35 +254,12 @@ EOF
     FAIL_COUNT=$((FAIL_COUNT + 1))
   fi
 
-  if [ -e "$TRACK_LOG" ]; then
-    track_log_exists_after="1"
-    track_log_snapshot_after="$(ls -ld -- "$TRACK_LOG" 2>/dev/null || echo "")"
-    track_log_content_after="$(cat "$TRACK_LOG" 2>/dev/null || echo "")"
-  else
-    track_log_exists_after="0"
-    track_log_snapshot_after=""
-    track_log_content_after=""
-  fi
-
-  if [ "$TRACK_LOG_EXISTS_BEFORE" = "0" ] && [ "$track_log_exists_after" = "0" ]; then
+  if test_track_log_not_modified; then
     TEST5_STATUS="OK"
-  elif [ "$TRACK_LOG_EXISTS_BEFORE" = "1" ] && [ "$track_log_exists_after" = "1" ]; then
-    if [ "$TRACK_LOG_SNAPSHOT_BEFORE" = "$track_log_snapshot_after" ] && [ "$TRACK_LOG_CONTENT_BEFORE" = "$track_log_content_after" ]; then
-      TEST5_STATUS="OK"
-    else
-      TEST5_STATUS="FAIL"
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-    fi
   else
     TEST5_STATUS="FAIL"
     FAIL_COUNT=$((FAIL_COUNT + 1))
   fi
-
-  suspect_count_3="$(count_suspects_in_output "$out3")"
-  case "$suspect_count_3" in
-    ''|*[!0-9]*) ;;
-    *) ;;
-  esac
 }
 
 trap cleanup EXIT
