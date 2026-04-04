@@ -3,6 +3,7 @@
 # Usage : ban-path-explorer.sh [options]
 # Exemples :
 #   ./ban-path-explorer.sh
+#   nohup ./ban-path-explorer.sh --log-dir /var/log/apache2 > /tmp/ban-path-explorer.out 2>&1 &
 #   ./ban-path-explorer.sh --log-dir /var/log/apache2 --threshold 25 --window 20
 #   ./ban-path-explorer.sh --log-files "error.log error_site.log" --ignore-paths "favicon.ico,robots.txt"
 #   ./ban-path-explorer.sh --ban --ban-duration 60
@@ -53,6 +54,9 @@ declare -A BEST_TOTAL_EVENTS=()
 print_usage() {
   cat <<EOF
 Usage: $SCRIPT_NAME [options]
+
+Exécution en arrière-plan:
+  nohup ./$SCRIPT_NAME --log-dir $DEFAULT_LOG_DIR > /tmp/ban-path-explorer.out 2>&1 &
 
 Options:
   --log-dir DIR            Dossier des logs Apache (défaut: $DEFAULT_LOG_DIR)
@@ -129,17 +133,10 @@ get_server_public_ipv4() {
 
 ensure_safe_ips_file() {
   local server_ip
-  server_ip="$(get_server_public_ipv4)"
   if [ ! -f "$SAFE_IPS_FILE" ]; then
-    {
-      printf '127.0.0.1\n'
-      printf '::1\n'
-      if [ -n "$server_ip" ]; then
-        printf '%s\n' "$server_ip"
-      fi
-    } > "$SAFE_IPS_FILE" 2>/dev/null || return 1
-    return 0
+    return 1
   fi
+  server_ip="$(get_server_public_ipv4)"
   if [ -n "$server_ip" ] && ! grep -Fxq "$server_ip" "$SAFE_IPS_FILE" 2>/dev/null; then
     printf '%s\n' "$server_ip" >> "$SAFE_IPS_FILE" 2>/dev/null || return 1
   fi
@@ -410,8 +407,8 @@ main() {
     exit 1
   fi
   if ! ensure_safe_ips_file; then
-    log_track "Erreur: impossible d'initialiser $SAFE_IPS_FILE"
-    printf 'Erreur: impossible d initialiser %s\n' "$SAFE_IPS_FILE" >&2
+    log_track "Erreur: fichier whitelist manquant: $SAFE_IPS_FILE"
+    printf 'Erreur: fichier whitelist introuvable: %s\n' "$SAFE_IPS_FILE" >&2
     exit 1
   fi
 
