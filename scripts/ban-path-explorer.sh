@@ -82,7 +82,7 @@ Options:
 EOF
 }
 
-early_help_exit() {
+early_help_return() {
   local arg
   for arg in "$@"; do
     case "$arg" in
@@ -150,7 +150,6 @@ get_server_public_ipv4() {
         if (b[2] >= 16 && b[2] <= 31) next;
       }
       print ip;
-      exit;
     }
   '
 }
@@ -423,22 +422,22 @@ main() {
     case "$1" in
       --log-dir)
         shift
-        [ $# -gt 0 ] || { printf 'Option --log-dir invalide\n' >&2; exit 1; }
+        [ $# -gt 0 ] || { printf 'Option --log-dir invalide\n' >&2; return 1; }
         LOG_DIR="$1"
         ;;
       --log-files)
         shift
-        [ $# -gt 0 ] || { printf 'Option --log-files invalide\n' >&2; exit 1; }
+        [ $# -gt 0 ] || { printf 'Option --log-files invalide\n' >&2; return 1; }
         LOG_FILES_RAW="$1"
         ;;
       --threshold)
         shift
-        [ $# -gt 0 ] || { printf 'Option --threshold invalide\n' >&2; exit 1; }
+        [ $# -gt 0 ] || { printf 'Option --threshold invalide\n' >&2; return 1; }
         THRESHOLD="$1"
         ;;
       --window)
         shift
-        [ $# -gt 0 ] || { printf 'Option --window invalide\n' >&2; exit 1; }
+        [ $# -gt 0 ] || { printf 'Option --window invalide\n' >&2; return 1; }
         WINDOW_MINUTES="$1"
         ;;
       --ban)
@@ -446,27 +445,27 @@ main() {
         ;;
       --ban-duration)
         shift
-        [ $# -gt 0 ] || { printf 'Option --ban-duration invalide\n' >&2; exit 1; }
+        [ $# -gt 0 ] || { printf 'Option --ban-duration invalide\n' >&2; return 1; }
         BAN_DURATION_MINUTES="$1"
         ;;
       --ignore-paths)
         shift
-        [ $# -gt 0 ] || { printf 'Option --ignore-paths invalide\n' >&2; exit 1; }
+        [ $# -gt 0 ] || { printf 'Option --ignore-paths invalide\n' >&2; return 1; }
         IGNORE_PATHS_RAW="$1"
         ;;
       --max-log-lines)
         shift
-        [ $# -gt 0 ] || { printf 'Option --max-log-lines invalide\n' >&2; exit 1; }
+        [ $# -gt 0 ] || { printf 'Option --max-log-lines invalide\n' >&2; return 1; }
         MAX_LOG_LINES="$1"
         ;;
       --max-events)
         shift
-        [ $# -gt 0 ] || { printf 'Option --max-events invalide\n' >&2; exit 1; }
+        [ $# -gt 0 ] || { printf 'Option --max-events invalide\n' >&2; return 1; }
         MAX_EVENTS="$1"
         ;;
       --lock-dir)
         shift
-        [ $# -gt 0 ] || { printf 'Option --lock-dir invalide\n' >&2; exit 1; }
+        [ $# -gt 0 ] || { printf 'Option --lock-dir invalide\n' >&2; return 1; }
         LOCK_DIR="$1"
         ;;
       --quiet)
@@ -479,7 +478,7 @@ main() {
       *)
         printf 'Option inconnue: %s\n' "$1" >&2
         print_usage >&2
-        exit 1
+        return 1
         ;;
     esac
     shift
@@ -487,23 +486,23 @@ main() {
 
   if ! is_uint "$THRESHOLD" || [ "$THRESHOLD" -eq 0 ]; then
     printf 'Erreur: --threshold doit être un entier positif\n' >&2
-    exit 1
+    return 1
   fi
   if ! is_uint "$WINDOW_MINUTES" || [ "$WINDOW_MINUTES" -eq 0 ]; then
     printf 'Erreur: --window doit être un entier positif\n' >&2
-    exit 1
+    return 1
   fi
   if ! is_uint "$BAN_DURATION_MINUTES" || [ "$BAN_DURATION_MINUTES" -eq 0 ]; then
     printf 'Erreur: --ban-duration doit être un entier positif\n' >&2
-    exit 1
+    return 1
   fi
   if ! is_uint "$MAX_LOG_LINES" || [ "$MAX_LOG_LINES" -eq 0 ]; then
     printf 'Erreur: --max-log-lines doit être un entier positif\n' >&2
-    exit 1
+    return 1
   fi
   if ! is_uint "$MAX_EVENTS" || [ "$MAX_EVENTS" -eq 0 ]; then
     printf 'Erreur: --max-events doit être un entier positif\n' >&2
-    exit 1
+    return 1
   fi
 
   WINDOW_SECONDS=$((WINDOW_MINUTES * 60))
@@ -511,12 +510,12 @@ main() {
 
   if ! setup_tracking_files; then
     printf 'Erreur: impossible de préparer %s ou %s\n' "$TRACK_LOG" "$BAN_STATE_FILE" >&2
-    exit 1
+    return 1
   fi
   if ! ensure_safe_ips_file; then
     log_track "Erreur: fichier whitelist manquant: $SAFE_IPS_FILE"
     printf 'Erreur: fichier whitelist introuvable: %s\n' "$SAFE_IPS_FILE" >&2
-    exit 1
+    return 1
   fi
   if ! acquire_lock; then
     if [ -n "$RUNNING_PID" ]; then
@@ -526,9 +525,9 @@ main() {
       log_track "Exécution ignorée: verrou déjà présent ($LOCK_DIR)"
       printf 'Erreur: une exécution est déjà en cours (%s)\n' "$LOCK_DIR" >&2
     fi
-    exit 1
+    return 1
   fi
-  trap 'release_lock' EXIT INT TERM
+  trap 'release_lock' return INT TERM
 
   load_safe_ips
   parse_ignore_paths
@@ -670,7 +669,7 @@ main() {
       log_track "Erreur iptables: impossible d'initialiser la chaîne BAN-PATH-EXPLORER"
       say "Erreur: impossible d'initialiser la chaîne IPTables BAN-PATH-EXPLORER"
       rm -f "$tmp_parsed" "$tmp_events" "$tmp_sorted" "$tmp_suspects"
-      exit 1
+      return 1
     fi
     cleanup_expired_bans
   fi
@@ -732,7 +731,7 @@ main() {
   rm -f "$tmp_parsed" "$tmp_events" "$tmp_sorted" "$tmp_suspects"
 }
 
-early_help_exit "$@"
+early_help_return "$@"
 if [ "$?" -eq 0 ]; then
   :
 else

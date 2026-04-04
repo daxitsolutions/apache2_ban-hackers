@@ -38,7 +38,7 @@ print_usage() {
   echo "Lance les tests en mode isolé dans /tmp."
 }
 
-early_help_exit() {
+early_help_return() {
   local arg
   for arg in "$@"; do
     case "$arg" in
@@ -184,7 +184,7 @@ run_tests() {
 
   if [ ! -x "$SCRIPT_UNDER_TEST" ]; then
     echo "Erreur: $SCRIPT_UNDER_TEST absent ou non exécutable."
-    exit 1
+    return 1
   fi
 
   apache_dir="$(detect_apache_log_dir)"
@@ -202,7 +202,7 @@ run_tests() {
     0) ;;
     *)
       echo "Erreur lors de la préparation des logs temporaires."
-      exit 1
+      return 1
       ;;
   esac
 
@@ -210,7 +210,7 @@ run_tests() {
   prepare_safe_ips_for_test
   if ! prepare_isolated_script_copy; then
     echo "Erreur lors de la préparation du script de test isolé."
-    exit 1
+    return 1
   fi
 
   out1="$TMP_OUT_DIR/test1.out"
@@ -280,11 +280,11 @@ run_tests() {
   fi
 }
 
-early_help_exit "$@"
+early_help_return "$@"
 if [ "$?" -eq 0 ]; then
   :
 else
-  trap cleanup EXIT
+  trap cleanup return
   run_tests
 
   echo "=== TEST ban-path-explorer.sh ==="
@@ -299,6 +299,6 @@ else
     :
   else
     echo "Au moins un test a échoué."
-    exit 1
+    return 1
   fi
 fi
