@@ -33,6 +33,24 @@ TRACK_LOG_EXISTS_BEFORE="0"
 TRACK_LOG_SNAPSHOT_BEFORE=""
 TRACK_LOG_CONTENT_BEFORE=""
 
+print_usage() {
+  echo "Usage : ./scripts/test-ban-path-explorer.sh [--help|-h]"
+  echo "Lance les tests en mode isolé dans /tmp."
+}
+
+early_help_exit() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --help|-h)
+        print_usage
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 cleanup() {
   rm -rf -- "$TMP_DIR" >/dev/null 2>&1 || true
 }
@@ -172,14 +190,14 @@ run_tests() {
   apache_dir="$(detect_apache_log_dir)"
   if [ -z "$apache_dir" ]; then
     echo "Aucun dossier de logs Apache détecté (/var/log/apache2 ou /var/log/httpd)."
-    exit 0
+    return 0
   fi
 
   copy_error_logs_limited "$apache_dir"
   case "$?" in
     2)
       echo "Aucun fichier error*.log présent dans $apache_dir."
-      exit 0
+      return 0
       ;;
     0) ;;
     *)
@@ -262,20 +280,25 @@ run_tests() {
   fi
 }
 
-trap cleanup EXIT
-run_tests
+early_help_exit "$@"
+if [ "$?" -eq 0 ]; then
+  :
+else
+  trap cleanup EXIT
+  run_tests
 
-echo "=== TEST ban-path-explorer.sh ==="
-echo "Test 1 : $TEST1_STATUS"
-echo "Test 2 : $TEST2_STATUS"
-echo "Test 3 : $TEST3_STATUS"
-echo "Test 4 : $TEST4_STATUS"
-echo "Test 5 : $TEST5_STATUS"
+  echo "=== TEST ban-path-explorer.sh ==="
+  echo "Test 1 : $TEST1_STATUS"
+  echo "Test 2 : $TEST2_STATUS"
+  echo "Test 3 : $TEST3_STATUS"
+  echo "Test 4 : $TEST4_STATUS"
+  echo "Test 5 : $TEST5_STATUS"
 
-if [ "$FAIL_COUNT" -eq 0 ]; then
-  echo "Tous les tests sont passés avec succès."
-  exit 0
+  if [ "$FAIL_COUNT" -eq 0 ]; then
+    echo "Tous les tests sont passés avec succès."
+    :
+  else
+    echo "Au moins un test a échoué."
+    exit 1
+  fi
 fi
-
-echo "Au moins un test a échoué."
-exit 1

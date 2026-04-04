@@ -82,6 +82,19 @@ Options:
 EOF
 }
 
+early_help_exit() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --help|-h)
+        print_usage
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 is_uint() {
   case "$1" in
     ''|*[!0-9]*) return 1 ;;
@@ -461,7 +474,7 @@ main() {
         ;;
       --help)
         print_usage
-        exit 0
+        return 0
         ;;
       *)
         printf 'Option inconnue: %s\n' "$1" >&2
@@ -533,7 +546,7 @@ main() {
     log_track "Aucun fichier log trouvé"
     say "Aucun fichier log à analyser"
     say "(enregistré dans $TRACK_LOG)"
-    exit 0
+    return 0
   fi
 
   for ip in "${LOG_FILES[@]}"; do
@@ -719,4 +732,9 @@ main() {
   rm -f "$tmp_parsed" "$tmp_events" "$tmp_sorted" "$tmp_suspects"
 }
 
-main "$@"
+early_help_exit "$@"
+if [ "$?" -eq 0 ]; then
+  :
+else
+  main "$@"
+fi
