@@ -11,6 +11,87 @@
 
 Collection de scripts shell pour la sécurité et l'observabilité Apache.
 
+### Clonage du repository
+
+Voici les étapes exactes pour cloner le repo `https://github.com/daxitsolutions/apache2_ban-hackers` :
+
+1. Installer Git (si ce n'est pas déjà fait) :
+
+```bash
+sudo apt update
+sudo apt install git -y
+```
+
+2. Cloner le repository :
+
+```bash
+git clone https://github.com/daxitsolutions/apache2_ban-hackers.git
+```
+
+3. Aller dans le dossier cloné :
+
+```bash
+cd apache2_ban-hackers
+```
+
+4. Voir ce qu'il contient :
+
+```bash
+ls -l scripts/
+```
+
+Tu verras notamment :
+
+- `ban-path-explorer.sh`
+- `test-ban-path-explorer.sh`
+- `safe-ips.txt`
+
+### Commandes utiles une fois cloné
+
+```bash
+# Voir l'aide du script principal
+./scripts/ban-path-explorer.sh --help
+
+# Lancer le test (recommandé)
+./scripts/test-ban-path-explorer.sh
+
+# Exemple d'utilisation du script de ban
+./scripts/ban-path-explorer.sh --log-dir /var/log/apache2 --threshold 20 --window 30
+```
+
+### Mise à jour du repository
+
+Une fois dans le dossier du repo :
+
+```bash
+cd ~/apache2_ban-hackers   # ou le chemin où tu l'as cloné
+git pull
+```
+
+`git pull` récupère les dernières modifications (nouveaux scripts, corrections, mises à jour de `ban-path-explorer.sh`, etc.).
+
+Commandes pratiques pour l'update :
+
+```bash
+# 1. Aller dans le dossier
+cd apache2_ban-hackers
+
+# 2. Mettre à jour
+git pull
+
+# 3. (Optionnel) Voir ce qui a changé
+git log --oneline -5
+```
+
+Astuce : alias rapide
+
+```bash
+echo 'alias update-ban="cd ~/apache2_ban-hackers && git pull"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Ensuite, tu peux lancer `update-ban` depuis n'importe où.
+
 ### Structure du projet
 
 Tous les scripts sont centralisés dans `scripts/` pour faciliter l'ajout de nouveaux outils.
