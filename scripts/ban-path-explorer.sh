@@ -246,14 +246,24 @@ parse_logs_to_tmp() {
             ts=""
             ip=""
             path=""
-            if (match(line, /^\[([0-9]{2}\/[A-Za-z]{3}\/[0-9]{4}:[0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4})\]/, t)) {
-              ts=t[1]
+            if (line ~ /^\[[0-9][0-9]\/[A-Za-z][A-Za-z][A-Za-z]\/[0-9][0-9][0-9][0-9]:[0-9][0-9]:[0-9][0-9]:[0-9][0-9] [+-][0-9][0-9][0-9][0-9]\]/) {
+              ts=substr(line, 2, 26)
             } else {
               i++
               continue
             }
-            if (match(line, /\[client ([^] ]+)\]/, c)) {
-              ip=c[1]
+            client_pos=index(line, "[client ")
+            if (client_pos > 0) {
+              client_part=substr(line, client_pos + 8)
+              client_end=index(client_part, "]")
+              if (client_end > 1) {
+                ip=substr(client_part, 1, client_end - 1)
+                split(ip, ipa, " ")
+                ip=ipa[1]
+              } else {
+                i++
+                continue
+              }
             } else {
               i++
               continue
