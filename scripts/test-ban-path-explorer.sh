@@ -27,6 +27,7 @@ TEST2_STATUS="FAIL"
 TEST3_STATUS="FAIL"
 TEST4_STATUS="FAIL"
 TEST5_STATUS="FAIL"
+TEST6_STATUS="FAIL"
 FAIL_COUNT=0
 
 TRACK_LOG_EXISTS_BEFORE="0"
@@ -176,35 +177,44 @@ test_track_log_not_modified() {
 
 run_tests() {
   local apache_dir
-  local out1 out2 out3 out4
+  local out1 out2 out3 out4 out5
   local suspect_count_2
   local suspect_count_3
   local has_bad_paths
   local has_white_ip
+  local synth_dir
+  local has_php_suspect
+  local have_real_logs="1"
+  local bash_assoc_ok="1"
 
   if [ ! -x "$SCRIPT_UNDER_TEST" ]; then
     echo "Erreur: $SCRIPT_UNDER_TEST absent ou non exécutable."
     return 1
   fi
+  if ! bash -c 'declare -A __test_assoc >/dev/null 2>&1'; then
+    bash_assoc_ok="0"
+  fi
 
   apache_dir="$(detect_apache_log_dir)"
   if [ -z "$apache_dir" ]; then
     echo "Aucun dossier de logs Apache détecté (/var/log/apache2 ou /var/log/httpd)."
-    return 0
+    have_real_logs="0"
   fi
 
-  copy_error_logs_limited "$apache_dir"
-  case "$?" in
-    2)
-      echo "Aucun fichier error*.log présent dans $apache_dir."
-      return 0
-      ;;
-    0) ;;
-    *)
-      echo "Erreur lors de la préparation des logs temporaires."
-      return 1
-      ;;
-  esac
+  if [ "$have_real_logs" = "1" ]; then
+    copy_error_logs_limited "$apache_dir"
+    case "$?" in
+      2)
+        echo "Aucun fichier error*.log présent dans $apache_dir."
+        have_real_logs="0"
+        ;;
+      0) ;;
+      *)
+        echo "Erreur lors de la préparation des logs temporaires."
+        return 1
+        ;;
+    esac
+  fi
 
   snapshot_track_log_before
   prepare_safe_ips_for_test
@@ -217,59 +227,67 @@ run_tests() {
   out2="$TMP_OUT_DIR/test2.out"
   out3="$TMP_OUT_DIR/test3.out"
   out4="$TMP_OUT_DIR/test4.out"
+  out5="$TMP_OUT_DIR/test5.out"
 
-  run_isolated "$out1" --log-dir "$TMP_LOG_DIR"
-  if [ "$?" -eq 0 ] && has_keywords_for_summary "$out1"; then
-    TEST1_STATUS="OK"
-  else
-    TEST1_STATUS="FAIL"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
+  if [ "$have_real_logs" = "1" ]; then
+    run_isolated "$out1" --log-dir "$TMP_LOG_DIR"
+    if [ "$?" -eq 0 ] && has_keywords_for_summary "$out1"; then
+      TEST1_STATUS="OK"
+    else
+      TEST1_STATUS="FAIL"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
 
-  run_isolated "$out2" --log-dir "$TMP_LOG_DIR" --threshold 5 --window 10
-  if [ "$?" -eq 0 ]; then
-    suspect_count_2="$(count_suspects_in_output "$out2")"
-    case "$suspect_count_2" in
-      ''|*[!0-9]*) TEST2_STATUS="FAIL"; FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
-      *) TEST2_STATUS="OK" ;;
-    esac
-  else
-    TEST2_STATUS="FAIL"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
+    run_isolated "$out2" --log-dir "$TMP_LOG_DIR" --threshold 5 --window 10
+    if [ "$?" -eq 0 ]; then
+      suspect_count_2="$(count_suspects_in_output "$out2")"
+      case "$suspect_count_2" in
+        ''|*[!0-9]*) TEST2_STATUS="FAIL"; FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+        *) TEST2_STATUS="OK" ;;
+      esac
+    else
+      TEST2_STATUS="FAIL"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
 
-  run_isolated "$out3" --log-dir "$TMP_LOG_DIR" --threshold 5 --window 10 --ignore-paths "favicon.ico,robots.txt"
-  if [ "$?" -eq 0 ]; then
-    has_bad_paths="$(grep -E '^Chemins :' "$out3" | grep -E 'favicon\.ico|robots\.txt' || true)"
-    suspect_count_3="$(count_suspects_in_output "$out3")"
-    case "$suspect_count_3" in
-      ''|*[!0-9]*) TEST3_STATUS="FAIL"; FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
-      *)
-        if [ -n "$has_bad_paths" ]; then
-          TEST3_STATUS="FAIL"
-          FAIL_COUNT=$((FAIL_COUNT + 1))
-        else
-          TEST3_STATUS="OK"
-        fi
-        ;;
-    esac
-  else
-    TEST3_STATUS="FAIL"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
+    run_isolated "$out3" --log-dir "$TMP_LOG_DIR" --threshold 5 --window 10 --ignore-paths "favicon.ico,robots.txt"
+    if [ "$?" -eq 0 ]; then
+      has_bad_paths="$(grep -E '^Chemins :' "$out3" | grep -E 'favicon\.ico|robots\.txt' || true)"
+      suspect_count_3="$(count_suspects_in_output "$out3")"
+      case "$suspect_count_3" in
+        ''|*[!0-9]*) TEST3_STATUS="FAIL"; FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+        *)
+          if [ -n "$has_bad_paths" ]; then
+            TEST3_STATUS="FAIL"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+          else
+            TEST3_STATUS="OK"
+          fi
+          ;;
+      esac
+    else
+      TEST3_STATUS="FAIL"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
 
-  run_isolated "$out4" --log-dir "$TMP_LOG_DIR" --threshold 1 --window 60
-  if [ "$?" -eq 0 ]; then
-    has_white_ip="$(grep -E '^IP suspecte : (127\.0\.0\.1|::1)$' "$out4" || true)"
-    if [ -z "$has_white_ip" ]; then
-      TEST4_STATUS="OK"
+    run_isolated "$out4" --log-dir "$TMP_LOG_DIR" --threshold 1 --window 60
+    if [ "$?" -eq 0 ]; then
+      has_white_ip="$(grep -E '^IP suspecte : (127\.0\.0\.1|::1)$' "$out4" || true)"
+      if [ -z "$has_white_ip" ]; then
+        TEST4_STATUS="OK"
+      else
+        TEST4_STATUS="FAIL"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+      fi
     else
       TEST4_STATUS="FAIL"
       FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
   else
-    TEST4_STATUS="FAIL"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    TEST1_STATUS="SKIP"
+    TEST2_STATUS="SKIP"
+    TEST3_STATUS="SKIP"
+    TEST4_STATUS="SKIP"
   fi
 
   if test_track_log_not_modified; then
@@ -278,13 +296,42 @@ run_tests() {
     TEST5_STATUS="FAIL"
     FAIL_COUNT=$((FAIL_COUNT + 1))
   fi
+
+  synth_dir="$TMP_DIR/synth-logs"
+  mkdir -p "$synth_dir" || return 1
+  cat <<'EOF' > "$synth_dir/error_php7-format.log"
+[Mon Apr 06 18:06:45.025892 2026] [php7:error] [pid 3434881:tid 3434881] [client 20.220.232.240:63738] script '/var/www/site/mds.php' not found or unable to stat
+[Mon Apr 06 18:06:51.985779 2026] [php7:error] [pid 3454717:tid 3454717] [client 20.220.232.240:64386] script '/var/www/site/acp.php' not found or unable to stat
+[Mon Apr 06 18:06:59.601305 2026] [php7:error] [pid 3432821:tid 3432821] [client 20.220.232.240:30916] script '/var/www/site/m.php' not found or unable to stat
+[Mon Apr 06 18:07:08.378878 2026] [php7:error] [pid 3467081:tid 3467081] [client 20.220.232.240:65430] script '/var/www/site/wp-is.php' not found or unable to stat
+[Mon Apr 06 18:07:14.294254 2026] [php7:error] [pid 3427044:tid 3427044] [client 20.220.232.240:64261] script '/var/www/site/file15.php' not found or unable to stat
+[Mon Apr 06 18:07:23.913928 2026] [php7:error] [pid 3480404:tid 3480404] [client 20.220.232.240:65427] script '/var/www/site/wsd.php' not found or unable to stat
+EOF
+
+  if [ "$bash_assoc_ok" = "1" ]; then
+    run_isolated "$out5" --log-dir "$synth_dir" --threshold 5 --window 30
+    if [ "$?" -eq 0 ]; then
+      has_php_suspect="$(grep -F 'IP suspecte : 20.220.232.240' "$out5" || true)"
+      if [ -n "$has_php_suspect" ]; then
+        TEST6_STATUS="OK"
+      else
+        TEST6_STATUS="FAIL"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+      fi
+    else
+      TEST6_STATUS="FAIL"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+  else
+    TEST6_STATUS="SKIP"
+  fi
 }
 
 early_help_return "$@"
 if [ "$?" -eq 0 ]; then
   :
 else
-  trap cleanup return
+  trap cleanup EXIT
   run_tests
 
   echo "=== TEST ban-path-explorer.sh ==="
@@ -293,12 +340,13 @@ else
   echo "Test 3 : $TEST3_STATUS"
   echo "Test 4 : $TEST4_STATUS"
   echo "Test 5 : $TEST5_STATUS"
+  echo "Test 6 : $TEST6_STATUS"
 
   if [ "$FAIL_COUNT" -eq 0 ]; then
     echo "Tous les tests sont passés avec succès."
-    :
+    exit 0
   else
     echo "Au moins un test a échoué."
-    return 1
+    exit 1
   fi
 fi

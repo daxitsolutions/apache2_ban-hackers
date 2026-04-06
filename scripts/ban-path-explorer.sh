@@ -201,10 +201,31 @@ should_ignore_path() {
 apache_to_unix_ts() {
   local apache_ts="$1"
   local first rest normalized
-  first="${apache_ts%%:*}"
-  rest="${apache_ts#*:}"
-  normalized="$first $rest"
-  date -d "$normalized" '+%s' 2>/dev/null
+  local cleaned
+  if [ -z "$apache_ts" ]; then
+    return 1
+  fi
+
+  # Format Apache classique: 06/Apr/2026:18:07:29 +0000
+  if printf '%s' "$apache_ts" | grep -Eq '^[0-9]{2}/[A-Za-z]{3}/[0-9]{4}:'; then
+    first="${apache_ts%%:*}"
+    rest="${apache_ts#*:}"
+    normalized="$first $rest"
+    if date -d "$normalized" '+%s' >/dev/null 2>&1; then
+      date -d "$normalized" '+%s' 2>/dev/null
+      return 0
+    fi
+    date -j -f '%d/%b/%Y %H:%M:%S %z' "$normalized" '+%s' 2>/dev/null
+    return $?
+  fi
+
+  # Format error log moderne: Mon Apr 06 18:07:29.239286 2026
+  if date -d "$apache_ts" '+%s' >/dev/null 2>&1; then
+    date -d "$apache_ts" '+%s' 2>/dev/null
+    return 0
+  fi
+  cleaned="$(printf '%s' "$apache_ts" | sed -E 's/([0-9]{2}:[0-9]{2}:[0-9]{2})\.[0-9]+/\1/')"
+  date -j -f '%a %b %d %H:%M:%S %Y' "$cleaned" '+%s' 2>/dev/null
 }
 
 build_log_files_list() {
@@ -242,12 +263,20 @@ parse_logs_to_tmp() {
         i = start
         while (i <= NR) {
           line = buf[i % max]
-          if (line ~ /\[error\]/ && (line ~ /File does not exist: / || line ~ /AH01276:/)) {
+          if (line ~ /\[[^]]*error\]/ &&
+              (line ~ /File does not exist: / ||
+               line ~ /AH01276:/ ||
+               line ~ /script .* not found or unable to stat/)) {
             ts=""
             ip=""
             path=""
+            marker=""
+            quote=sprintf("%c", 39)
+
             if (line ~ /^\[[0-9][0-9]\/[A-Za-z][A-Za-z][A-Za-z]\/[0-9][0-9][0-9][0-9]:[0-9][0-9]:[0-9][0-9]:[0-9][0-9] [+-][0-9][0-9][0-9][0-9]\]/) {
               ts=substr(line, 2, 26)
+            } else if (match(line, /^\[[A-Za-z][A-Za-z][A-Za-z] [A-Za-z][A-Za-z][A-Za-z] [ 0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9](\.[0-9]+)? [0-9][0-9][0-9][0-9]\]/)) {
+              ts=substr(line, 2, RLENGTH - 2)
             } else {
               i++
               continue
@@ -260,6 +289,15 @@ parse_logs_to_tmp() {
                 ip=substr(client_part, 1, client_end - 1)
                 split(ip, ipa, " ")
                 ip=ipa[1]
+                if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$/) {
+                  sub(/:[0-9]+$/, "", ip)
+                } else if (ip ~ /^\[[0-9A-Fa-f:]+\]:[0-9]+$/) {
+                  sub(/^\[/, "", ip)
+                  sub(/\]:[0-9]+$/, "", ip)
+                } else if (ip ~ /^\[[0-9A-Fa-f:]+\]$/) {
+                  sub(/^\[/, "", ip)
+                  sub(/\]$/, "", ip)
+                }
               } else {
                 i++
                 continue
@@ -277,8 +315,16 @@ parse_logs_to_tmp() {
                 path=substr(line, pos2 + length("AH01276:"))
                 sub(/^[[:space:]]+/, "", path)
               } else {
-                i++
-                continue
+                pos3=index(line, "script ")
+                marker=" not found or unable to stat"
+                if (pos3 > 0 && index(line, marker) > pos3) {
+                  path=substr(line, pos3 + length("script "), index(line, marker) - (pos3 + length("script ")))
+                  sub("^" quote, "", path)
+                  sub(quote "$", "", path)
+                } else {
+                  i++
+                  continue
+                }
               }
             }
             print ts "\t" ip "\t" path "\t" FILENAME
@@ -403,11 +449,19 @@ ban_ip() {
 }
 
 format_hm() {
-  date -d "@$1" '+%H:%M'
+  if date -d "@$1" '+%H:%M' >/dev/null 2>&1; then
+    date -d "@$1" '+%H:%M'
+  else
+    date -r "$1" '+%H:%M'
+  fi
 }
 
 format_ymd_hm() {
-  date -d "@$1" '+%Y-%m-%d %H:%M'
+  if date -d "@$1" '+%Y-%m-%d %H:%M' >/dev/null 2>&1; then
+    date -d "@$1" '+%Y-%m-%d %H:%M'
+  else
+    date -r "$1" '+%Y-%m-%d %H:%M'
+  fi
 }
 
 main() {
