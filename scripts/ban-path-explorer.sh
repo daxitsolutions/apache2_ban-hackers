@@ -32,6 +32,8 @@ DEFAULT_QUIET="0"
 DEFAULT_BAN="0"
 DEFAULT_MAX_LOG_LINES="20000"
 DEFAULT_MAX_EVENTS="200000"
+DEFAULT_FOLLOW="0"
+DEFAULT_FOLLOW_INTERVAL_SECONDS="5"
 
 LOG_DIR="$DEFAULT_LOG_DIR"
 LOG_FILES_RAW=""
@@ -44,6 +46,8 @@ BAN_ENABLED="$DEFAULT_BAN"
 MAX_LOG_LINES="$DEFAULT_MAX_LOG_LINES"
 MAX_EVENTS="$DEFAULT_MAX_EVENTS"
 LOCK_DIR="$LOCK_DIR_BASE"
+FOLLOW_MODE="$DEFAULT_FOLLOW"
+FOLLOW_INTERVAL_SECONDS="$DEFAULT_FOLLOW_INTERVAL_SECONDS"
 
 WINDOW_SECONDS="0"
 BAN_DURATION_SECONDS="0"
@@ -73,6 +77,8 @@ Options:
   --window MIN             Fenêtre glissante en minutes (défaut: $DEFAULT_WINDOW_MINUTES)
   --max-log-lines N        Max lignes lues par fichier log (défaut: $DEFAULT_MAX_LOG_LINES)
   --max-events N           Max événements traités par exécution (défaut: $DEFAULT_MAX_EVENTS)
+  --follow                 Mode continu: relance l'analyse en boucle
+  --follow-interval SEC    Intervalle en secondes en mode --follow (défaut: $DEFAULT_FOLLOW_INTERVAL_SECONDS)
   --lock-dir DIR           Verrou d'exécution unique (défaut: $LOCK_DIR_BASE)
   --ignore-paths "a,b,c"   Ignore les chemins contenant ces motifs
   --ban                    Active le blocage IPTables
@@ -464,6 +470,39 @@ format_ymd_hm() {
   fi
 }
 
+run_follow_mode() {
+  local -a follow_cmd=()
+  local cycle=0
+  local rc=0
+
+  follow_cmd=(bash "$SCRIPT_DIR/$SCRIPT_NAME" --log-dir "$LOG_DIR" --threshold "$THRESHOLD" --window "$WINDOW_MINUTES" --max-log-lines "$MAX_LOG_LINES" --max-events "$MAX_EVENTS" --lock-dir "$LOCK_DIR")
+  if [ -n "$LOG_FILES_RAW" ]; then
+    follow_cmd+=(--log-files "$LOG_FILES_RAW")
+  fi
+  if [ -n "$IGNORE_PATHS_RAW" ]; then
+    follow_cmd+=(--ignore-paths "$IGNORE_PATHS_RAW")
+  fi
+  if [ "$BAN_ENABLED" -eq 1 ]; then
+    follow_cmd+=(--ban --ban-duration "$BAN_DURATION_MINUTES")
+  fi
+  if [ "$QUIET" -eq 1 ]; then
+    follow_cmd+=(--quiet)
+  fi
+
+  say "Mode continu activé (intervalle: ${FOLLOW_INTERVAL_SECONDS}s)"
+  log_track "Mode continu activé | interval=${FOLLOW_INTERVAL_SECONDS}s"
+
+  while :; do
+    cycle=$((cycle + 1))
+    "${follow_cmd[@]}"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      log_track "Cycle follow en erreur | cycle=$cycle | code=$rc"
+    fi
+    sleep "$FOLLOW_INTERVAL_SECONDS"
+  done
+}
+
 main() {
   local now_header tmp_parsed tmp_events tmp_sorted tmp_suspects
   local analyzed_count=0
@@ -527,6 +566,14 @@ main() {
         [ $# -gt 0 ] || { printf 'Option --max-events invalide\n' >&2; return 1; }
         MAX_EVENTS="$1"
         ;;
+      --follow)
+        FOLLOW_MODE=1
+        ;;
+      --follow-interval)
+        shift
+        [ $# -gt 0 ] || { printf 'Option --follow-interval invalide\n' >&2; return 1; }
+        FOLLOW_INTERVAL_SECONDS="$1"
+        ;;
       --lock-dir)
         shift
         [ $# -gt 0 ] || { printf 'Option --lock-dir invalide\n' >&2; return 1; }
@@ -568,9 +615,18 @@ main() {
     printf 'Erreur: --max-events doit être un entier positif\n' >&2
     return 1
   fi
+  if ! is_uint "$FOLLOW_INTERVAL_SECONDS" || [ "$FOLLOW_INTERVAL_SECONDS" -eq 0 ]; then
+    printf 'Erreur: --follow-interval doit être un entier positif\n' >&2
+    return 1
+  fi
 
   WINDOW_SECONDS=$((WINDOW_MINUTES * 60))
   BAN_DURATION_SECONDS=$((BAN_DURATION_MINUTES * 60))
+
+  if [ "$FOLLOW_MODE" -eq 1 ]; then
+    run_follow_mode
+    return 0
+  fi
 
   if ! setup_tracking_files; then
     printf 'Erreur: impossible de préparer %s ou %s\n' "$TRACK_LOG" "$BAN_STATE_FILE" >&2
