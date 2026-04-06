@@ -436,7 +436,7 @@ ban_ip() {
   local until_ts="$2"
   if iptables -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
     update_ban_state "$ip" "$until_ts"
-    log_track "IP déjà bannie, expiration mise à jour: $ip (jusqu'à $until_ts)"
+    log_track "IP déjà bannie: règle iptables existante, aucun ajout: $ip (expiration mise à jour: $until_ts)"
     return 0
   fi
   if iptables -A BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
