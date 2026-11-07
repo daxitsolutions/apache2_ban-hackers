@@ -38,7 +38,7 @@ cd /opt/apache2_ban-hackers
 
 ```bash
 echo $SSH_CLIENT | cut -d' ' -f1                 # votre IP actuelle, si vous êtes connecté en SSH
-sudo nano scripts/data/safe-ips.txt
+sudo vim scripts/data/safe-ips.txt
 ```
 
 Une IP ou une plage par ligne (`203.0.113.10`, `198.51.100.0/24`, `2001:db8::/48`), `#` pour les commentaires. Les adresses du serveur lui-même sont toujours protégées. Ne poussez pas ce fichier complété sur un dépôt public : il révèle vos IPs d'administration.
