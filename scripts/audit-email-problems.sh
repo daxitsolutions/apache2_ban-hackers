@@ -1,94 +1,124 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# Usage : ./scripts/audit-email-problems.sh DOMAINE [SELECTEUR_DKIM ...]
+# Exemples :
+#   ./scripts/audit-email-problems.sh daxit.be
+#   ./scripts/audit-email-problems.sh example.com s1 s2      # sélecteurs DKIM supplémentaires
+# Vérifie SPF, DMARC, DKIM, MTA-STS et TLS-RPT (lecture DNS uniquement).
 
-# Couleurs pour l'affichage
+set -u
+
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # Pas de couleur
+NC='\033[0m'
 
-DOMAIN="daxit.be"
-
-echo -e "${BLUE}==================================================${NC}"
-echo -e "${BLUE}    MINI-AUDIT DE SÉCURITÉ EMAIL POUR : $DOMAIN   ${NC}"
-echo -e "${BLUE}==================================================${NC}"
-echo ""
-
-# 1. VÉRIFICATION DU SPF
-echo -e "${BLUE}[1/3] Vérification de l'enregistrement SPF...${NC}"
-SPF_RECORD=$(dig +short TXT $DOMAIN | grep "v=spf1")
-
-if [ -z "$SPF_RECORD" ]; then
-    echo -e "${RED}❌ AUCUN ENREGISTREMENT SPF TROUVÉ !${NC}"
-    echo -e "N'importe quel serveur peut usurper l'identité de @$DOMAIN."
-else
-    echo -e "${GREEN}✅ SPF trouvé :${NC} $SPF_RECORD"
-    if [[ "$SPF_RECORD" == *"-all"* ]]; then
-        echo -e "${GREEN}-> Politique stricte (-all) active.${NC}"
-    elif [[ "$SPF_RECORD" == *"~all"* ]]; then
-        echo -e "${YELLOW}-> Politique souple (~all). Recommandé au début, mais moins restrictif.${NC}"
-    else
-        echo -e "${RED}-> Attention: Politique obsolète ou trop permissive (?all ou +all).${NC}"
-    fi
+DOMAIN="${1:-}"
+if [ -z "$DOMAIN" ] || [ "$DOMAIN" = "-h" ] || [ "$DOMAIN" = "--help" ]; then
+  sed -n '3,7p' "$0"
+  [ -n "$DOMAIN" ]; exit $?
+fi
+shift
+if ! command -v dig >/dev/null 2>&1; then
+  echo "Erreur : dig est requis (sudo apt install dnsutils)" >&2
+  exit 1
 fi
 
-echo -e "\n--------------------------------------------------\n"
+ok()   { echo -e "${GREEN}✅ $*${NC}"; }
+warn() { echo -e "${YELLOW}⚠️  $*${NC}"; }
+bad()  { echo -e "${RED}❌ $*${NC}"; }
+# Enregistrements TXT, guillemets et découpage en morceaux de 255 caractères retirés
+txt()  { dig +short TXT "$1" | sed -e 's/" "//g' -e 's/"//g'; }
+sep()  { echo -e "\n--------------------------------------------------\n"; }
 
-# 2. VÉRIFICATION DE DMARC
-echo -e "${BLUE}[2/3] Vérification de l'enregistrement DMARC...${NC}"
-DMARC_RECORD=$(dig +short TXT _dmarc.$DOMAIN)
+echo -e "${BLUE}==================================================${NC}"
+echo -e "${BLUE}    MINI-AUDIT DE SÉCURITÉ EMAIL POUR : $DOMAIN${NC}"
+echo -e "${BLUE}==================================================${NC}\n"
 
+# 1. SPF
+echo -e "${BLUE}[1/5] SPF${NC}"
+SPF_RECORDS="$(txt "$DOMAIN" | grep -i '^v=spf1')"
+SPF_COUNT="$(printf '%s' "$SPF_RECORDS" | grep -c . )"
+if [ "$SPF_COUNT" -eq 0 ]; then
+  bad "Aucun enregistrement SPF : n'importe quel serveur peut envoyer au nom de @$DOMAIN."
+elif [ "$SPF_COUNT" -gt 1 ]; then
+  bad "$SPF_COUNT enregistrements SPF : c'est invalide (RFC 7208), le SPF est ignoré. Fusionnez-les :"
+  printf '   %s\n' "$SPF_RECORDS"
+else
+  ok "SPF : $SPF_RECORDS"
+  case "$SPF_RECORDS" in
+    *-all*) ok "Politique stricte (-all)." ;;
+    *~all*) warn "Politique souple (~all) : acceptable au début, passez à -all une fois les envois validés." ;;
+    *\?all*) bad "Politique neutre (?all) : n'apporte aucune protection." ;;
+    *+all*) bad "+all : autorise TOUS les serveurs du monde, à corriger immédiatement." ;;
+    *redirect=*) ok "Politique déléguée (redirect=)." ;;
+    *) bad "Pas de mécanisme 'all' final : équivaut à ?all (aucune protection)." ;;
+  esac
+fi
+sep
+
+# 2. DMARC
+echo -e "${BLUE}[2/5] DMARC${NC}"
+DMARC_RECORD="$(txt "_dmarc.$DOMAIN" | grep -i '^v=DMARC1')"
 if [ -z "$DMARC_RECORD" ]; then
-    echo -e "${RED}❌ AUCUN ENREGISTREMENT DMARC TROUVÉ !${NC}"
-    echo -e "C'est la faille exploitée dans le mail d'exemple (dmarc=none)."
+  bad "Aucun enregistrement DMARC : l'usurpation de @$DOMAIN n'est ni bloquée ni signalée."
 else
-    echo -e "${GREEN}✅ DMARC trouvé :${NC} $DMARC_RECORD"
-    if [[ "$DMARC_RECORD" == *"p=reject"* ]]; then
-        echo -e "${GREEN}-> Protection maximale (p=reject) active ! Les faux mails sont bloqués.${NC}"
-    elif [[ "$DMARC_RECORD" == *"p=quarantine"* ]]; then
-        echo -e "${YELLOW}-> Protection modérée (p=quarantine). Les faux mails vont en spam.${NC}"
-    elif [[ "$DMARC_RECORD" == *"p=none"* ]]; then
-        echo -e "${RED}-> Mode observation uniquement (p=none). L'usurpation n'est pas bloquée.${NC}"
-    fi
+  ok "DMARC : $DMARC_RECORD"
+  case "$DMARC_RECORD" in
+    *p=reject*) ok "Protection maximale (p=reject) : les faux mails sont rejetés." ;;
+    *p=quarantine*) warn "Protection modérée (p=quarantine) : les faux mails vont en spam." ;;
+    *p=none*) bad "Mode observation (p=none) : l'usurpation n'est pas bloquée." ;;
+  esac
+  [[ $DMARC_RECORD == *rua=* ]] || warn "Pas de rua= : vous ne recevez aucun rapport sur les tentatives d'usurpation."
+  if [[ $DMARC_RECORD =~ pct=([0-9]+) ]] && [ "${BASH_REMATCH[1]}" -lt 100 ]; then
+    warn "pct=${BASH_REMATCH[1]} : la politique ne s'applique qu'à ${BASH_REMATCH[1]} % des mails."
+  fi
+  [[ $DMARC_RECORD == *sp=none* ]] && warn "sp=none : les sous-domaines (x.$DOMAIN) restent usurpables."
 fi
+sep
 
-echo -e "\n--------------------------------------------------\n"
-
-# 3. VÉRIFICATION DKIM (Sélecteurs fréquents)
-# 3. VÉRIFICATION DKIM (Sélecteurs ciblés et intelligents)
-echo -e "${BLUE}[3/3] Vérification des clés DKIM...${NC}"
-echo "Note: Le DKIM requiert de tester des 'sélecteurs' spécifiques."
-echo -e "Analyse des sélecteurs officiels de votre hébergeur (One.com) et des géants du cloud :\n"
-
-# Liste optimisée : sélecteurs One.com, Microsoft 365, Google et défauts universels
-SELECTORS=(
-    "one" "key1" "key2"                             # One.com standards
-    "20201015" "20230601"                           # Sélecteurs historiques/temporels One.com
-    "selector1" "selector2"                         # Microsoft Office 365 par défaut
-    "google"                                        # Google Workspace par défaut
-    "default" "mail" "smtp"                         # Génériques courants
-)
-
+# 3. DKIM
+echo -e "${BLUE}[3/5] DKIM${NC}"
+echo "Sélecteurs testés : courants (One.com, Microsoft 365, Google, génériques) + ceux passés en argument."
+SELECTORS=(one key1 key2 20201015 20230601 selector1 selector2 google default mail smtp dkim s1 s2 k1 "$@")
 FOUND_DKIM=0
-
 for selector in "${SELECTORS[@]}"; do
-    # Interrogation DNS silencieuse
-    DKIM_RECORD=$(dig +short TXT ${selector}._domainkey.$DOMAIN | tr -d '"' | tr -d '[:space:]')
-    
-    if [ ! -z "$DKIM_RECORD" ] && [[ "$DKIM_RECORD" == *"v=DKIM1"* ]]; then
-        echo -e "${GREEN}✅ Clé DKIM active trouvée !${NC} (Sélecteur: ${YELLOW}${selector}${NC})"
-        # Découpage propre pour l'affichage si la clé est trop longue
-        echo -e "   -> ${DKIM_RECORD:0:80}..."
-        FOUND_DKIM=1
+  DKIM_RECORD="$(txt "${selector}._domainkey.$DOMAIN" | tr -d '[:space:]')"
+  if [[ $DKIM_RECORD == *v=DKIM1* || $DKIM_RECORD == *p=* ]]; then
+    if [[ $DKIM_RECORD == *"p=;"* || $DKIM_RECORD == *p= ]]; then
+      warn "Sélecteur $selector : clé révoquée (p= vide)."
+    else
+      ok "Clé DKIM trouvée (sélecteur : $selector) : ${DKIM_RECORD:0:70}..."
+      FOUND_DKIM=1
     fi
+  fi
 done
+if [ "$FOUND_DKIM" -eq 0 ]; then
+  warn "Aucune clé DKIM trouvée parmi ces sélecteurs."
+  echo "-> Le sélecteur figure dans l'en-tête DKIM-Signature (s=...) d'un mail envoyé : relancez avec ce sélecteur en argument."
+fi
+sep
 
-if [ $FOUND_DKIM -eq 0 ]; then
-    echo -e "${YELLOW}⚠️  Aucune clé DKIM publique standard n'a été détectée en surface.${NC}"
-    echo "-> Si vous venez d'activer le DKIM dans le panneau One.com, l'affichage peut prendre jusqu'à 24h."
-    echo "-> Si vos e-mails partent de One.com sans option activée, ils utilisent la clé globale de l'hébergeur."
+# 4. MTA-STS (chiffrement obligatoire des mails entrants)
+echo -e "${BLUE}[4/5] MTA-STS${NC}"
+MTASTS="$(txt "_mta-sts.$DOMAIN" | grep -i '^v=STSv1')"
+if [ -n "$MTASTS" ]; then
+  ok "MTA-STS : $MTASTS (politique : https://mta-sts.$DOMAIN/.well-known/mta-sts.txt)"
+else
+  warn "Pas de MTA-STS : un attaquant en position d'interception peut forcer la réception des mails en clair."
+fi
+sep
+
+# 5. TLS-RPT (rapports d'échec TLS)
+echo -e "${BLUE}[5/5] TLS-RPT${NC}"
+TLSRPT="$(txt "_smtp._tls.$DOMAIN" | grep -i '^v=TLSRPTv1')"
+if [ -n "$TLSRPT" ]; then
+  ok "TLS-RPT : $TLSRPT"
+else
+  warn "Pas de TLS-RPT : vous n'êtes pas prévenu des échecs de chiffrement (utile avec MTA-STS)."
 fi
 
 echo -e "\n${BLUE}==================================================${NC}"
-echo -e "${BLUE}               FIN DE L'AUDIT                     ${NC}"
+echo -e "${BLUE}               FIN DE L'AUDIT${NC}"
 echo -e "${BLUE}==================================================${NC}"
