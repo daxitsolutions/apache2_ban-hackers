@@ -28,6 +28,9 @@ DEFAULT_LOG_DIR="/var/log/apache2"
 DEFAULT_THRESHOLD="20"
 DEFAULT_WINDOW_MINUTES="30"
 DEFAULT_BAN_DURATION_MINUTES="60"
+# ponytail: paliers de récidive fixes (minutes) ; en faire des options si besoin réel
+RECIDIVE_MINUTES=(0 1440 10080 43200)   # 2e ban : 24 h, 3e : 7 j, 4e et + : 30 j
+RECIDIVE_MEMORY_SECONDS=$((30 * 86400))   # un ban expiré est retenu 30 j pour compter les récidives
 DEFAULT_IGNORE_PATHS=""
 DEFAULT_QUIET="0"
 DEFAULT_BAN="0"
@@ -71,6 +74,7 @@ declare -A ST_COUNT=()
 declare -A ST_SINCE=()
 NOW_TS="$(date '+%s')"
 BAN_UNTIL=""
+BAN_COUNT="0"
 HISTORY_MODE="0"
 RUNNING_PID=""
 WORK_DIR=""
@@ -95,7 +99,8 @@ Options:
   --lock-dir DIR           Verrou d'exécution unique (défaut: $LOCK_DIR_BASE)
   --ignore-paths "a,b,c"   Ignore les chemins contenant ces motifs
   --ban                    Active le blocage IPTables
-  --ban-duration MIN       Durée de blocage en minutes (défaut: $DEFAULT_BAN_DURATION_MINUTES)
+  --ban-duration MIN       Durée du 1er blocage en minutes (défaut: $DEFAULT_BAN_DURATION_MINUTES)
+                           Récidive (mémoire 30 j) : 2e ban 24 h, 3e 7 j, puis 30 j
   --history                Analyse tout l'historique lu (par défaut : seulement
                            les événements des --window dernières minutes)
   --quiet                  N'affiche rien à l'écran
@@ -610,9 +615,12 @@ cleanup_expired_bans() {
     if [ "$exp" -le "$NOW_TS" ]; then
       if ipt "$ip" -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
         ipt "$ip" -D BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1
-        log_track "Déblocage expiré: $ip"
+        log_track "Déblocage expiré: $ip (bans: ${ST_COUNT[$ip]})"
       fi
-      forget_ip "$ip"
+      # On garde la trace un moment pour allonger le prochain ban si l'IP revient
+      if [ "$exp" -le $((NOW_TS - RECIDIVE_MEMORY_SECONDS)) ]; then
+        forget_ip "$ip"
+      fi
     else
       # Ban encore valide mais règle absente (redémarrage, flush) : on la réapplique
       if ! ipt "$ip" -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
@@ -664,11 +672,16 @@ ban_ip() {
       return 1
     fi
   fi
-  ST_COUNT["$ip"]=1
+  local count=$(( ${ST_COUNT[$ip]:-0} + 1 ))
+  local step=$((count > ${#RECIDIVE_MINUTES[@]} ? ${#RECIDIVE_MINUTES[@]} - 1 : count - 1))
+  local duration=$(( RECIDIVE_MINUTES[step] * 60 ))
+  [ "$duration" -lt "$BAN_DURATION_SECONDS" ] && duration="$BAN_DURATION_SECONDS"
+  ST_COUNT["$ip"]="$count"
   ST_SINCE["$ip"]="$NOW_TS"
-  ST_EXP["$ip"]=$((NOW_TS + BAN_DURATION_SECONDS))
+  ST_EXP["$ip"]=$((NOW_TS + duration))
   BAN_UNTIL="${ST_EXP[$ip]}"
-  log_track "IP bannie: $ip (jusqu'à $(format_ymd_hm "$BAN_UNTIL"))"
+  BAN_COUNT="$count"
+  log_track "IP bannie: $ip (ban n°$count, $((duration / 60)) min, jusqu'à $(format_ymd_hm "$BAN_UNTIL"))"
   return 0
 }
 
@@ -1073,7 +1086,7 @@ main() {
 
       if [ "$BAN_ENABLED" -eq 1 ]; then
         if ban_ip "$ip"; then
-          action_line="ban appliqué jusqu'à $(format_ymd_hm "$BAN_UNTIL")"
+          action_line="ban n°$BAN_COUNT appliqué jusqu'à $(format_ymd_hm "$BAN_UNTIL")"
         else
           action_line="ban échoué"
         fi

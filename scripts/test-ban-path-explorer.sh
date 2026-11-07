@@ -497,6 +497,24 @@ run_ban_tests() {
   ban_check "Fenêtre #7 (cycle --follow sans événement = log vide)" bash -c "[ ! -s '$TMP_TRACK_LOG' ]"
   rm -f "$d/site_access.log"
 
+  # #8 : chaque récidive allonge le ban (1 h -> 24 h -> 7 j -> 30 j)
+  reset_bans
+  for i in 1 2 3 4 5 6; do acc 198.51.100.40 "$i" "GET /r$i.php" 404; done > "$d/site_access.log"
+  local n expected now exp
+  for n in 1 2 3 4 5; do
+    run_isolated "$out" --log-dir "$d" --threshold 5 --ban
+    now=$(date +%s)
+    exp=$(awk -F'|' '$1 == "198.51.100.40" { print $2 }' "$TMP_BAN_STATE")
+    case "$n" in 1) expected=60 ;; 2) expected=1440 ;; 3) expected=10080 ;; *) expected=43200 ;; esac
+    ban_check "Récidive #8 (ban n°$n = $expected min)" bash -c "grep -q '^198.51.100.40|[0-9]*|$n|' '$TMP_BAN_STATE' && [ \$(( ($exp - $now) / 60 )) -ge $((expected - 1)) ] && [ \$(( ($exp - $now) / 60 )) -le $expected ]"
+    # expiration simulée, l'IP revient avec de nouveaux événements
+    awk -F'|' -v OFS='|' -v t="$((now - 3600))" '$1 == "198.51.100.40" { $2 = t; $4 = t - 1 } { print }' "$TMP_BAN_STATE" > "$TMP_BAN_STATE.x" && mv "$TMP_BAN_STATE.x" "$TMP_BAN_STATE"
+  done
+  rm -f "$d/site_access.log"
+  : > "$d/error.log"
+  run_isolated "$out" --log-dir "$d" --ban
+  ban_check "Récidive #8 (ban expiré levé mais mémorisé)" bash -c "! iptables -w -S BAN-PATH-EXPLORER | grep -q 198.51.100.40 && grep -q '^198.51.100.40|' '$TMP_BAN_STATE'"
+
   # #2 : une signature déclenche le ban iptables sans seuil
   reset_bans
   acc 198.51.100.20 1 "GET /.env" 404 > "$d/site_access.log"
