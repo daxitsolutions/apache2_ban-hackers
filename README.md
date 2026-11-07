@@ -135,6 +135,17 @@ Tests :
 ./scripts/test-ban-path-explorer.sh
 ```
 
+
+### Service permanent (bans conservés après redémarrage)
+
+Les bans actifs sont stockés dans `/var/lib/ban-path-explorer/state`. À chaque cycle avec `--ban`, les règles absentes (après un redémarrage ou un flush) sont réappliquées. Une IP ajoutée à `safe-ips.txt` est débloquée au cycle suivant.
+
+```bash
+sudo git clone https://github.com/daxitsolutions/apache2_ban-hackers.git /opt/apache2_ban-hackers
+sudo cp /opt/apache2_ban-hackers/scripts/ban-path-explorer.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now ban-path-explorer
+```
+
 ---
 
 ## English
@@ -182,4 +193,14 @@ Tests:
 
 ```bash
 ./scripts/test-ban-path-explorer.sh
+```
+
+### Permanent service (bans survive reboots)
+
+Active bans are stored in `/var/lib/ban-path-explorer/state`. On every `--ban` cycle, missing rules (after a reboot or flush) are re-applied. An IP added to `safe-ips.txt` is unbanned on the next cycle.
+
+```bash
+sudo git clone https://github.com/daxitsolutions/apache2_ban-hackers.git /opt/apache2_ban-hackers
+sudo cp /opt/apache2_ban-hackers/scripts/ban-path-explorer.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now ban-path-explorer
 ```

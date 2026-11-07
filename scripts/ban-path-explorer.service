@@ -1,0 +1,15 @@
+# Service systemd : surveillance continue + réapplication des bans au démarrage.
+# Installation (adapter le chemin du repo) :
+#   sudo cp scripts/ban-path-explorer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now ban-path-explorer
+[Unit]
+Description=Ban Path Explorer - bans automatiques depuis les logs Apache
+After=network-online.target apache2.service
+
+[Service]
+ExecStart=/opt/apache2_ban-hackers/scripts/ban-path-explorer.sh --follow --ban --quiet
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

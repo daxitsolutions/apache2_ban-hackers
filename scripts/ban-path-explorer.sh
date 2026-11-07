@@ -20,7 +20,8 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SAFE_IPS_FILE="$SCRIPT_DIR/safe-ips.txt"
 TRACK_LOG="/var/log/ban-path-explorer.log"
-BAN_STATE_FILE="/var/log/ban-path-explorer.state"
+BAN_STATE_FILE="/var/lib/ban-path-explorer/state"
+LEGACY_BAN_STATE_FILE="/var/log/ban-path-explorer.state"
 LOCK_DIR_BASE="/tmp/ban-path-explorer.lock"
 
 DEFAULT_LOG_DIR="/var/log/apache2"
@@ -173,7 +174,11 @@ setup_tracking_files() {
     mkdir -p "$track_dir" 2>/dev/null || return 1
   fi
   if [ ! -d "$state_dir" ]; then
-    mkdir -p "$state_dir" 2>/dev/null || return 1
+    mkdir -p -m 700 "$state_dir" 2>/dev/null || return 1
+  fi
+  # Migration de l'ancien emplacement (un état n'est pas un log : logrotate pourrait le tronquer)
+  if [ ! -s "$BAN_STATE_FILE" ] && [ -s "$LEGACY_BAN_STATE_FILE" ]; then
+    cat "$LEGACY_BAN_STATE_FILE" > "$BAN_STATE_FILE" && rm -f "$LEGACY_BAN_STATE_FILE"
   fi
   touch "$TRACK_LOG" 2>/dev/null || return 1
   touch "$BAN_STATE_FILE" 2>/dev/null || return 1
@@ -437,12 +442,23 @@ cleanup_expired_bans() {
     if ! is_uint "$exp"; then
       continue
     fi
+    if [ -n "${SAFE_IPS[$ip]+x}" ]; then
+      # IP ajoutée en whitelist après son ban : on la libère
+      ipt "$ip" -D BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1 && log_track "Déblocage (whitelist): $ip"
+      continue
+    fi
     if [ "$exp" -le "$now_ts" ]; then
       if ipt "$ip" -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
         ipt "$ip" -D BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1
         log_track "Déblocage expiré: $ip"
       fi
     else
+      # Ban encore valide mais règle absente (redémarrage, flush) : on la réapplique
+      if ! ipt "$ip" -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
+        if is_valid_ip "$ip" && ipt "$ip" -A BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
+          log_track "Ban restauré depuis l'état: $ip (jusqu'à $exp)"
+        fi
+      fi
       printf '%s|%s\n' "$ip" "$exp" >> "$tmp_file"
     fi
   done < "$BAN_STATE_FILE"
