@@ -375,6 +375,16 @@ run_ban_tests() {
   done > "$d/error.log"
   run_isolated "$out" --log-dir "$d" --threshold 5 --ban
   ban_check "Ban #4 (IP invalide refusée)" bash -c "grep -q 'Ban refusé: IP invalide' '$TMP_TRACK_LOG' && ! iptables -w -S BAN-PATH-EXPLORER | grep -q -- '-s '"
+
+  # #3 : IPv6 (format Apache 2.4 sans crochets, avec port) et IPv4 mappée
+  reset_bans
+  for i in 1 2 3 4 5 6; do
+    php_err "2001:db8::bad:54321" "a$i.php" "$i"
+    php_err "::ffff:198.51.100.7:4444" "b$i.php" "$i"
+  done > "$d/error.log"
+  run_isolated "$out" --log-dir "$d" --threshold 5 --ban
+  ban_check "Ban #3 (IPv6 bannie via ip6tables)" has_rule ip6tables "2001:db8::bad/128"
+  ban_check "Ban #3 (IPv4 mappée bannie en IPv4)" has_rule iptables "198.51.100.7/32"
 }
 
 early_help_return "$@"
