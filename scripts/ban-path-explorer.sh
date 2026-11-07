@@ -66,7 +66,6 @@ declare -A BEST_START=()
 declare -A BEST_END=()
 declare -A BEST_PATHS=()
 declare -A BEST_TOTAL_EVENTS=()
-declare -A TS_CACHE=()
 declare -A SIG_HIT=()
 declare -A LAST_TS=()
 declare -A ST_EXP=()
@@ -336,36 +335,6 @@ should_ignore_path() {
   return 1
 }
 
-apache_to_unix_ts() {
-  local apache_ts="$1"
-  local first rest normalized
-  local cleaned
-  if [ -z "$apache_ts" ]; then
-    return 1
-  fi
-
-  # Format Apache classique: 06/Apr/2026:18:07:29 +0000
-  if printf '%s' "$apache_ts" | grep -Eq '^[0-9]{2}/[A-Za-z]{3}/[0-9]{4}:'; then
-    first="${apache_ts%%:*}"
-    rest="${apache_ts#*:}"
-    normalized="${first//\// } $rest"   # "06 Apr 2026 18:07:29 +0000" : lisible par GNU date (pas "06/Apr/2026")
-    if date -d "$normalized" '+%s' >/dev/null 2>&1; then
-      date -d "$normalized" '+%s' 2>/dev/null
-      return 0
-    fi
-    date -j -f '%d %b %Y %H:%M:%S %z' "$normalized" '+%s' 2>/dev/null
-    return $?
-  fi
-
-  # Format error log moderne: Mon Apr 06 18:07:29.239286 2026
-  if date -d "$apache_ts" '+%s' >/dev/null 2>&1; then
-    date -d "$apache_ts" '+%s' 2>/dev/null
-    return 0
-  fi
-  cleaned="$(printf '%s' "$apache_ts" | sed -E 's/([0-9]{2}:[0-9]{2}:[0-9]{2})\.[0-9]+/\1/')"
-  date -j -f '%a %b %d %H:%M:%S %Y' "$cleaned" '+%s' 2>/dev/null
-}
-
 build_log_files_list() {
   local f
   if [ -n "$LOG_FILES_RAW" ]; then
@@ -412,11 +381,16 @@ warn_uncovered_logs() {
 
 parse_logs_to_tmp() {
   local out_file="$1"
-  local f
+  local f cutoff=0
+  [ "$HISTORY_MODE" -eq 1 ] || cutoff=$((NOW_TS - WINDOW_SECONDS))
   : > "$out_file"
   for f in "${LOG_FILES[@]}"; do
-    awk -v max="$MAX_LOG_LINES" -v pf="$BAD_PATTERNS_FILE" '
+    # tail lit depuis la fin du fichier : coût indépendant de la taille du log
+    tail -n "$MAX_LOG_LINES" "$f" | awk -v max="$MAX_LOG_LINES" -v pf="$BAD_PATTERNS_FILE" -v fname="$f" \
+      -v cutoff="$cutoff" -v tzoff="$(date '+%z')" '
       BEGIN {
+        split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", mn, " ")
+        for (k = 1; k <= 12; k++) MON[mn[k]] = k
         # Signatures à ban immédiat (sous-chaînes, insensibles à la casse)
         np = 0
         while ((getline p < pf) > 0) {
@@ -424,6 +398,38 @@ parse_logs_to_tmp() {
           if (p == "" || substr(p, 1, 1) == "#") continue
           pat[++np] = tolower(p)
         }
+      }
+      # Jours depuis 1970-01-01 (algorithme "days from civil", sans appel à date)
+      function days(y, m, d,   era, yoe, doy, doe) {
+        y -= (m <= 2)
+        era = int((y >= 0 ? y : y - 399) / 400)
+        yoe = y - era * 400
+        doy = int((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) + d - 1
+        doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+        return era * 146097 + doe - 719468
+      }
+      # "06/Apr/2026:18:07:29 +0000" (access) ou "Mon Apr 06 18:07:29.239286 2026" (error, heure locale)
+      # ponytail: heure locale convertie avec le décalage actuel ; faux d une heure autour d un changement d heure
+      function to_epoch(t,   a, n, y, m, d, H, M, S, off) {
+        if (t ~ /^[0-9][0-9]\/[A-Za-z][A-Za-z][A-Za-z]\/[0-9][0-9][0-9][0-9]:/) {
+          d = substr(t, 1, 2) + 0; m = MON[substr(t, 4, 3)]; y = substr(t, 8, 4) + 0
+          H = substr(t, 13, 2) + 0; M = substr(t, 16, 2) + 0; S = substr(t, 19, 2) + 0
+          off = substr(t, 22, 5)
+        } else {
+          n = split(t, a, " ")
+          m = MON[a[2]]; d = a[3] + 0; y = a[n] + 0
+          H = substr(a[4], 1, 2) + 0; M = substr(a[4], 4, 2) + 0; S = substr(a[4], 7, 2) + 0
+          off = tzoff
+        }
+        if (!m || !y) return -1
+        if (off !~ /^[+-][0-9][0-9][0-9][0-9]$/) off = tzoff
+        return days(y, m, d) * 86400 + H * 3600 + M * 60 + S \
+          - (substr(off, 1, 1) == "-" ? -1 : 1) * (substr(off, 2, 2) * 3600 + substr(off, 4, 2) * 60)
+      }
+      # Écrit un événement : horodatage converti, et filtré sur la fenêtre (cutoff=0 avec --history)
+      function emit(t, rest,   e) {
+        e = to_epoch(t)
+        if (e >= 0 && e >= cutoff) print e "\t" rest
       }
       function sig(s,   k) {
         s = tolower(s)
@@ -461,12 +467,12 @@ parse_logs_to_tmp() {
             # requête + statut + referer + user-agent : Log4Shell/Shellshock passent par les en-têtes
             hit = sig(rest)
             if (hit != "") {
-              print ts "\t" ip "\t" url "\t" FILENAME "\tsig:" hit
+              emit(ts, ip "\t" url "\t" fname "\tsig:" hit)
             } else if (status ~ /^(400|403|404|405)$/) {
-              print ts "\t" ip "\t" url "\t" FILENAME
+              emit(ts, ip "\t" url "\t" fname)
             } else if (r[1] == "POST" && url ~ /(wp-login|xmlrpc)\.php$/) {
               # ponytail: brute force = N POST distincts (le compteur porte sur les chemins uniques)
-              print ts "\t" ip "\tPOST " url " #" i "\t" FILENAME
+              emit(ts, ip "\tPOST " url " #" i "\t" fname)
             }
             i++
             continue
@@ -553,12 +559,12 @@ parse_logs_to_tmp() {
               }
             }
             hit = modsec ? "modsecurity" : sig(path)
-            print ts "\t" ip "\t" path "\t" FILENAME (hit != "" ? "\tsig:" hit : "")
+            emit(ts, ip "\t" path "\t" fname (hit != "" ? "\tsig:" hit : ""))
           }
           i++
         }
       }
-    ' "$f" >> "$out_file"
+    ' >> "$out_file"
   done
 }
 
@@ -775,15 +781,11 @@ main() {
   local analyzed_count=0
   local line_ts line_ip line_path line_file
   local unix_ts
-  local window_start
-  local current_ip=""
-  local idx=0
   local threshold_reached=0
   local total_records=0
   local suspect_count=0
-  local ip first_paths max_paths
-  local first_epoch last_epoch unique_count total_in_window
-  local old_path
+  local ip first_paths
+  local first_epoch last_epoch unique_count
   local action_line
   local expiry_now
   local capped_events=0
@@ -959,7 +961,7 @@ main() {
 
   parse_logs_to_tmp "$tmp_parsed"
 
-  local line_kind cutoff_ts=$((NOW_TS - WINDOW_SECONDS))
+  local line_kind
   [ -f "$BAD_PATTERNS_FILE" ] || log_track "Avertissement: $BAD_PATTERNS_FILE absent, aucun ban par signature"
   while IFS=$'\t' read -r line_ts line_ip line_path line_file line_kind || [ -n "${line_ts}${line_ip}${line_path}${line_file}" ]; do
     [ -z "${line_ts:-}" ] && continue
@@ -972,22 +974,9 @@ main() {
     if should_ignore_path "$line_path"; then
       continue
     fi
-    if [ -n "${TS_CACHE[$line_ts]+x}" ]; then
-      unix_ts="${TS_CACHE[$line_ts]}"
-    else
-      unix_ts="$(apache_to_unix_ts "$line_ts")"
-      if [ -n "$unix_ts" ] && is_uint "$unix_ts"; then
-        TS_CACHE["$line_ts"]="$unix_ts"
-      fi
-    fi
-    [ -z "$unix_ts" ] && continue
-    if ! is_uint "$unix_ts"; then
-      continue
-    fi
-    # Seuls les événements récents comptent (sinon un vieux scan est re-détecté à chaque cycle)
-    if [ "$HISTORY_MODE" -eq 0 ] && [ "$unix_ts" -lt "$cutoff_ts" ]; then
-      continue
-    fi
+    # Horodatage déjà converti et filtré sur la fenêtre par l'awk de parsing (événements récents seulement)
+    unix_ts="$line_ts"
+    is_uint "$unix_ts" || continue
     if [ -z "${LAST_TS[$line_ip]+x}" ] || [ "$unix_ts" -gt "${LAST_TS[$line_ip]}" ]; then
       LAST_TS["$line_ip"]="$unix_ts"
     fi
@@ -995,90 +984,58 @@ main() {
     if [ "${line_kind#sig:}" != "${line_kind:-}" ] && [ -z "${SIG_HIT[$line_ip]+x}" ]; then
       SIG_HIT["$line_ip"]="${line_kind#sig:} -> $line_path"
     fi
-    printf '%s|%s|%s\n' "$line_ip" "$unix_ts" "$line_path" >> "$tmp_events"
+    printf '%s|%s|%s\n' "$line_ip" "$unix_ts" "$line_path"
     total_records=$((total_records + 1))
     if [ "$total_records" -ge "$MAX_EVENTS" ]; then
       capped_events=1
       break
     fi
-  done < "$tmp_parsed"
+  done < "$tmp_parsed" > "$tmp_events"
 
   if [ -s "$tmp_events" ]; then
     sort -t'|' -k1,1 -k2,2n "$tmp_events" > "$tmp_sorted"
   fi
 
-  declare -a WINDOW_TS=()
-  declare -a WINDOW_PATHS=()
-  declare -A WINDOW_PATH_COUNT=()
-  declare -A WINDOW_SAMPLE=()
-  local path_key
-
-  while IFS='|' read -r line_ip unix_ts line_path || [ -n "${line_ip}${unix_ts}${line_path}" ]; do
-    [ -z "${line_ip:-}" ] && continue
-    [ -z "${unix_ts:-}" ] && continue
-    [ -z "${line_path:-}" ] && continue
-
-    if [ "$line_ip" != "$current_ip" ]; then
-      current_ip="$line_ip"
-      WINDOW_TS=()
-      WINDOW_PATHS=()
-      unset WINDOW_PATH_COUNT
-      declare -A WINDOW_PATH_COUNT=()
-      idx=0
-    fi
-
-    # ponytail: clé = dernier segment du chemin, pour ne pas compter deux fois le même 404 vu
-    # dans error.log (/var/www/site/x.php) et access.log (/x.php). Sous-compte /a/x.php vs /b/x.php.
-    path_key="${line_path%/}"
-    path_key="${path_key##*/}"
-    [ -z "$path_key" ] && path_key="/"
-    WINDOW_SAMPLE["$path_key"]="$line_path"
-    line_path="$path_key"
-    WINDOW_TS+=("$unix_ts")
-    WINDOW_PATHS+=("$line_path")
-    if [ -n "${WINDOW_PATH_COUNT[$line_path]+x}" ]; then
-      WINDOW_PATH_COUNT["$line_path"]=$((WINDOW_PATH_COUNT["$line_path"] + 1))
-    else
-      WINDOW_PATH_COUNT["$line_path"]=1
-    fi
-
-    window_start=$((unix_ts - WINDOW_SECONDS))
-    while [ "$idx" -lt "${#WINDOW_TS[@]}" ] && [ "${WINDOW_TS[$idx]}" -lt "$window_start" ]; do
-      old_path="${WINDOW_PATHS[$idx]}"
-      if [ -n "${WINDOW_PATH_COUNT[$old_path]+x}" ]; then
-        WINDOW_PATH_COUNT["$old_path"]=$((WINDOW_PATH_COUNT["$old_path"] - 1))
-        if [ "${WINDOW_PATH_COUNT[$old_path]}" -le 0 ]; then
-          unset 'WINDOW_PATH_COUNT[$old_path]'
-        fi
-      fi
-      idx=$((idx + 1))
-    done
-
-    unique_count="${#WINDOW_PATH_COUNT[@]}"
-    total_in_window=$(( ${#WINDOW_TS[@]} - idx ))
-    if [ "$unique_count" -ge "$THRESHOLD" ]; then
-      threshold_reached=1
-      if [ -z "${BEST_COUNT[$line_ip]+x}" ] || [ "$unique_count" -gt "${BEST_COUNT[$line_ip]}" ]; then
-        BEST_COUNT["$line_ip"]="$unique_count"
-        BEST_START["$line_ip"]="${WINDOW_TS[$idx]}"
-        BEST_END["$line_ip"]="$unix_ts"
-        BEST_TOTAL_EVENTS["$line_ip"]="$total_in_window"
-        first_paths=""
-        max_paths=0
-        for ip in "${!WINDOW_PATH_COUNT[@]}"; do
-          if [ "$max_paths" -lt 10 ]; then
-            if [ -z "$first_paths" ]; then
-              first_paths="${WINDOW_SAMPLE[$ip]}"
-            else
-              first_paths="$first_paths, ${WINDOW_SAMPLE[$ip]}"
-            fi
-          fi
-          max_paths=$((max_paths + 1))
-        done
-        BEST_PATHS["$line_ip"]="$first_paths"
-      fi
-    fi
-  done < "$tmp_sorted"
+  # Fenêtre glissante par IP (événements triés par IP puis date), en un seul passage awk :
+  # nombre maximal de chemins distincts dans une fenêtre de --window minutes.
+  # ponytail: clé = dernier segment du chemin, pour ne pas compter deux fois le même 404 vu
+  # dans error.log (/var/www/site/x.php) et access.log (/x.php). Sous-compte /a/x.php vs /b/x.php.
+  local w_ip w_count w_start w_end w_total w_paths
+  while IFS=$'\t' read -r w_ip w_count w_start w_end w_total w_paths; do
+    [ -n "$w_ip" ] || continue
+    threshold_reached=1
+    BEST_COUNT["$w_ip"]="$w_count"
+    BEST_START["$w_ip"]="$w_start"
+    BEST_END["$w_ip"]="$w_end"
+    BEST_TOTAL_EVENTS["$w_ip"]="$w_total"
+    BEST_PATHS["$w_ip"]="$w_paths"
+  done < <(awk -F'|' -v win="$WINDOW_SECONDS" -v thr="$THRESHOLD" '
+    function flush(   k, list, c) {
+      if (best > 0) print cur "\t" best "\t" bs "\t" be "\t" bt "\t" bp
+    }
+    $1 != cur {
+      flush()
+      cur = $1; n = 0; head = 1; uniq = 0; best = 0
+      delete cnt; delete sample
+    }
+    {
+      ts = $2 + 0
+      path = substr($0, length($1) + length($2) + 3)
+      k = path; sub(/\/$/, "", k); sub(/.*\//, "", k); if (k == "") k = "/"
+      n++; T[n] = ts; K[n] = k; sample[k] = path
+      if (cnt[k]++ == 0) uniq++
+      while (T[head] < ts - win) {
+        if (--cnt[K[head]] == 0) { delete cnt[K[head]]; uniq-- }
+        head++
+      }
+      if (uniq >= thr && uniq > best) {
+        best = uniq; bs = T[head]; be = ts; bt = n - head + 1
+        bp = ""; c = 0
+        for (x in cnt) { if (c++ < 10) bp = bp (bp == "" ? "" : ", ") sample[x] }
+      }
+    }
+    END { flush() }
+  ' "$tmp_sorted" 2>/dev/null)
 
   if [ "$BAN_ENABLED" -eq 1 ]; then
     if ! ensure_ban_chain; then
