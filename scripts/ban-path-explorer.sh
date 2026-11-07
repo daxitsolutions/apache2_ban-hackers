@@ -89,7 +89,7 @@ Exécution en arrière-plan:
 Options:
   --log-dir DIR            Dossier des logs Apache (défaut: $DEFAULT_LOG_DIR)
   --log-files "F1 F2 ..."  Liste de fichiers logs séparés par des espaces
-                           (défaut: error*.log et *access*.log de --log-dir)
+                           (défaut: *error*.log, *access*.log, *error_log, *access_log de --log-dir)
   --threshold N            Seuil d'URLs différentes par IP (défaut: $DEFAULT_THRESHOLD)
   --window MIN             Fenêtre glissante en minutes (défaut: $DEFAULT_WINDOW_MINUTES)
   --max-log-lines N        Max lignes lues par fichier log (défaut: $DEFAULT_MAX_LOG_LINES)
@@ -380,11 +380,34 @@ build_log_files_list() {
       fi
     done
   else
-    for f in "$LOG_DIR"/error*.log "$LOG_DIR"/*access*.log; do
+    # Debian : error.log, monsite-error.log, other_vhosts_access.log ; RHEL : error_log, ssl_access_log
+    for f in "$LOG_DIR"/*error*.log "$LOG_DIR"/*access*.log "$LOG_DIR"/*error_log "$LOG_DIR"/*access_log; do
       [ -f "$f" ] || continue
       LOG_FILES+=("$f")
     done
   fi
+}
+
+# Avertit si un ErrorLog/CustomLog déclaré dans la config Apache n'est pas analysé
+warn_uncovered_logs() {
+  local f g covered
+  [ -n "$LOG_FILES_RAW" ] && return 0
+  while read -r f; do
+    f="${f//\"/}"
+    f="${f//\$\{APACHE_LOG_DIR\}/$LOG_DIR}"
+    case "$f" in /*) ;; *) continue ;; esac   # pipe (|rotatelogs), syslog:, chemin relatif
+    [ -f "$f" ] || continue
+    covered=0
+    for g in "${LOG_FILES[@]}"; do
+      [ "$g" = "$f" ] && { covered=1; break; }
+    done
+    if [ "$covered" -eq 0 ]; then
+      log_track "Avertissement: log Apache non analysé: $f (ajoutez-le avec --log-files ou --log-dir)"
+      say "Avertissement : log Apache non analysé : $f"
+    fi
+  done < <(grep -RhoiE '^[[:space:]]*(ErrorLog|CustomLog)[[:space:]]+[^[:space:]]+' \
+             /etc/apache2/apache2.conf /etc/apache2/sites-enabled /etc/apache2/conf-enabled \
+             /etc/httpd/conf /etc/httpd/conf.d 2>/dev/null | awk '{ print $2 }' | sort -u)
 }
 
 parse_logs_to_tmp() {
@@ -720,6 +743,8 @@ run_follow_mode() {
     follow_cmd+=(--quiet)
   fi
 
+  build_log_files_list
+  warn_uncovered_logs   # une seule fois, pas à chaque cycle
   say "Mode continu activé (intervalle: ${FOLLOW_INTERVAL_SECONDS}s)"
   log_track "Mode continu activé | interval=${FOLLOW_INTERVAL_SECONDS}s"
 
@@ -890,11 +915,12 @@ main() {
   load_local_ips
   parse_ignore_paths
   build_log_files_list
+  [ "${BAN_PATH_FOLLOW_CHILD:-0}" = "1" ] || warn_uncovered_logs
 
   analyzed_count="${#LOG_FILES[@]}"
   now_header="$(date '+%Y-%m-%d %H:%M')"
   say "[$now_header] Ban Path Explorer v$VERSION"
-  say "Analysé : $analyzed_count fichiers log (error*.log + *access*.log)"
+  say "Analysé : $analyzed_count fichiers log (error + access)"
   say "Fenêtre : $WINDOW_MINUTES minutes | Seuil : $THRESHOLD URLs différentes"
 
   log_routine "Démarrage v$VERSION | log-dir=$LOG_DIR | files=\"$LOG_FILES_RAW\" | threshold=$THRESHOLD | window=$WINDOW_MINUTES | ban=$BAN_ENABLED | ban-duration=$BAN_DURATION_MINUTES | quiet=$QUIET | ignore=\"$IGNORE_PATHS_RAW\" | max-log-lines=$MAX_LOG_LINES | max-events=$MAX_EVENTS | lock-dir=$LOCK_DIR"
