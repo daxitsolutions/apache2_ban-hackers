@@ -515,6 +515,22 @@ run_ban_tests() {
   run_isolated "$out" --log-dir "$d" --ban
   ban_check "Récidive #8 (ban expiré levé mais mémorisé)" bash -c "! iptables -w -S BAN-PATH-EXPLORER | grep -q 198.51.100.40 && grep -q '^198.51.100.40|' '$TMP_BAN_STATE'"
 
+  # #9 : logs de vhosts (monsite-error.log, RHEL access_log) analysés ; log déclaré hors --log-dir signalé
+  reset_bans
+  : > "$d/error.log"
+  for i in 1 2 3 4 5 6; do php_err "198.51.100.50:1" "v$i.php" "$i"; done > "$d/monsite-error.log"
+  for i in 1 2 3 4 5 6; do acc 198.51.100.51 "$i" "GET /w$i.php" 404; done > "$d/ssl_access_log"
+  mkdir -p /etc/apache2/sites-enabled /srv/autre
+  : > /srv/autre/site.log
+  printf 'ErrorLog ${APACHE_LOG_DIR}/monsite-error.log\nCustomLog "/srv/autre/site.log" combined\nCustomLog "|/usr/bin/rotatelogs x" combined\n' > /srv/autre/vhost.conf
+  ln -sf /srv/autre/vhost.conf /etc/apache2/sites-enabled/vhost.conf
+  run_isolated "$out" --log-dir "$d" --threshold 5
+  ban_check "Vhosts #9 (monsite-error.log analysé)" grep -qx 'IP suspecte : 198.51.100.50' "$out"
+  ban_check "Vhosts #9 (ssl_access_log RHEL analysé)" grep -qx 'IP suspecte : 198.51.100.51' "$out"
+  ban_check "Vhosts #9 (log hors --log-dir signalé)" grep -q 'non analysé : /srv/autre/site.log' "$out"
+  ban_check "Vhosts #9 (log couvert non signalé)" bash -c "! grep -q 'non analysé : .*monsite-error' '$out'"
+  rm -rf "$d/monsite-error.log" "$d/ssl_access_log" /etc/apache2/sites-enabled/vhost.conf /srv/autre
+
   # #2 : une signature déclenche le ban iptables sans seuil
   reset_bans
   acc 198.51.100.20 1 "GET /.env" 404 > "$d/site_access.log"
