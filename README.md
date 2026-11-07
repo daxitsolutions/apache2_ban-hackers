@@ -99,6 +99,7 @@ Tous les scripts sont centralisés dans `scripts/` pour faciliter l'ajout de nou
 - `scripts/ban-path-explorer.sh` : détection de scans de chemins dans les logs Apache
 - `scripts/test-ban-path-explorer.sh` : tests du script principal
 - `scripts/safe-ips.txt` : whitelist d'IPs utilisée par les scripts qui en ont besoin
+- `scripts/bad-patterns.txt` : signatures d'attaque (`/.env`, `../`, `${jndi:`, `union select`…) qui déclenchent un ban dès la première requête
 
 ### Usage générique (plusieurs scripts)
 
@@ -159,6 +160,7 @@ All scripts are grouped under `scripts/` so new tools can be added consistently.
 - `scripts/ban-path-explorer.sh`: detects path-scanning behavior in Apache logs
 - `scripts/test-ban-path-explorer.sh`: test runner for the main script
 - `scripts/safe-ips.txt`: IP whitelist used by scripts that require it
+- `scripts/bad-patterns.txt`: attack signatures (`/.env`, `../`, `${jndi:`, `union select`…) that trigger a ban on the very first request
 
 ### Generic usage (multiple scripts)
 
