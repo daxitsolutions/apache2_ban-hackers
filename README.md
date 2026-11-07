@@ -147,6 +147,25 @@ sudo cp /opt/apache2_ban-hackers/scripts/ban-path-explorer.service /etc/systemd/
 sudo systemctl daemon-reload && sudo systemctl enable --now ban-path-explorer
 ```
 
+
+### Derrière un reverse proxy / CDN (important)
+
+Si Apache est derrière nginx, HAProxy, un load balancer ou Cloudflare, les logs contiennent **l'IP du proxy**, pas celle de l'attaquant. Par sécurité, le script refuse de bannir les IPs privées (10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16, fc00::/7, fe80::/10) et le journalise (`Ban refusé: IP privée`). Si ce message apparaît, activez `mod_remoteip` pour que les logs contiennent la vraie IP du client :
+
+```bash
+sudo a2enmod remoteip
+sudo tee /etc/apache2/conf-available/remoteip.conf >/dev/null <<'CONF'
+RemoteIPHeader X-Forwarded-For
+# IP(s) de vos proxys de confiance uniquement (sinon l'en-tête est falsifiable)
+RemoteIPTrustedProxy 10.0.0.0/8
+CONF
+sudo a2enconf remoteip
+```
+
+Dans les `LogFormat`, remplacez `%h` par `%a` pour l'access log ; l'error log utilise déjà l'IP corrigée. Rechargez ensuite Apache avec `sudo systemctl reload apache2`.
+
+Avec un **CDN public** (Cloudflare…), utilisez `RemoteIPTrustedProxyList` avec la liste des IPs du CDN. Attention : bannir avec iptables n'a alors **aucun effet**, puisque le trafic arrive depuis le CDN. Il faut bloquer au niveau du CDN, ou n'accepter sur 80/443 que les IPs du CDN.
+
 ---
 
 ## English
@@ -206,3 +225,7 @@ sudo git clone https://github.com/daxitsolutions/apache2_ban-hackers.git /opt/ap
 sudo cp /opt/apache2_ban-hackers/scripts/ban-path-explorer.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now ban-path-explorer
 ```
+
+### Behind a reverse proxy / CDN (important)
+
+Behind nginx, HAProxy, a load balancer or Cloudflare, logs show the **proxy IP**, not the attacker's. As a safety net the script refuses to ban private IPs (10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16, fc00::/7, fe80::/10) and logs `Ban refusé: IP privée`. If you see it, enable `mod_remoteip` (`RemoteIPHeader X-Forwarded-For` + `RemoteIPTrustedProxy <your proxies>`) and use `%a` instead of `%h` in `LogFormat`. With a public CDN, iptables bans are useless (traffic comes from the CDN): block at the CDN level.

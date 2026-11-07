@@ -417,6 +417,16 @@ run_ban_tests() {
   run_isolated "$out" --log-dir "$d" --threshold 5 --ban
   ban_check "Ban #4 (IP invalide refusée)" bash -c "grep -q 'Ban refusé: IP invalide' '$TMP_TRACK_LOG' && ! iptables -w -S BAN-PATH-EXPLORER | grep -q -- '-s '"
 
+  # #6 : une IP privée (reverse proxy probable) n'est jamais bannie
+  reset_bans
+  for i in 1 2 3 4 5 6; do
+    acc 10.0.0.5 "$i" "GET /x$i.php" 404
+    acc fd00::5 "$i" "GET /y$i.php" 404
+  done > "$d/site_access.log"
+  run_isolated "$out" --log-dir "$d" --threshold 5 --ban
+  rm -f "$d/site_access.log"
+  ban_check "Ban #6 (IP privée v4/v6 jamais bannie)" bash -c "grep -q 'Ban refusé: IP privée 10.0.0.5' '$TMP_TRACK_LOG' && grep -q 'Ban refusé: IP privée fd00::5' '$TMP_TRACK_LOG' && ! iptables -w -S BAN-PATH-EXPLORER | grep -q -- '-s ' && ! ip6tables -w -S BAN-PATH-EXPLORER | grep -q -- '-s '"
+
   # #3 : IPv6 (format Apache 2.4 sans crochets, avec port) et IPv4 mappée
   reset_bans
   for i in 1 2 3 4 5 6; do
