@@ -65,6 +65,13 @@ declare -A BEST_PATHS=()
 declare -A BEST_TOTAL_EVENTS=()
 declare -A TS_CACHE=()
 declare -A SIG_HIT=()
+declare -A LAST_TS=()
+declare -A ST_EXP=()
+declare -A ST_COUNT=()
+declare -A ST_SINCE=()
+NOW_TS="$(date '+%s')"
+BAN_UNTIL=""
+HISTORY_MODE="0"
 RUNNING_PID=""
 WORK_DIR=""
 
@@ -89,6 +96,8 @@ Options:
   --ignore-paths "a,b,c"   Ignore les chemins contenant ces motifs
   --ban                    Active le blocage IPTables
   --ban-duration MIN       Durée de blocage en minutes (défaut: $DEFAULT_BAN_DURATION_MINUTES)
+  --history                Analyse tout l'historique lu (par défaut : seulement
+                           les événements des --window dernières minutes)
   --quiet                  N'affiche rien à l'écran
   --help                   Affiche cette aide
 EOF
@@ -186,6 +195,12 @@ log_track() {
   now_line="$(date '+%Y-%m-%d %H:%M:%S')"
   msg="$1"
   printf '[%s] %s\n' "$now_line" "$msg" >> "$TRACK_LOG"
+}
+
+# Lignes de routine (démarrage, fin...) : omises dans les cycles --follow pour ne pas
+# écrire plusieurs lignes toutes les 5 secondes quand il ne se passe rien.
+log_routine() {
+  [ "${BAN_PATH_FOLLOW_CHILD:-0}" = "1" ] || log_track "$1"
 }
 
 setup_tracking_files() {
@@ -549,37 +564,64 @@ release_lock() {
   fi
 }
 
-cleanup_expired_bans() {
-  local now_ts tmp_file ip exp
-  now_ts="$(date '+%s')"
+# État des bans en mémoire : IP -> expiration, nombre de bans, début du ban en cours.
+# Format du fichier : ip|expiration|nombre|debut (les anciennes lignes "ip|expiration" restent lisibles).
+load_state() {
+  local ip exp count since
+  while IFS='|' read -r ip exp count since || [ -n "${ip:-}" ]; do
+    [ -n "${ip:-}" ] && is_uint "${exp:-}" || continue
+    is_uint "${count:-}" || count=1
+    is_uint "${since:-}" || since=0
+    ST_EXP["$ip"]="$exp"
+    ST_COUNT["$ip"]="$count"
+    ST_SINCE["$ip"]="$since"
+  done < "$BAN_STATE_FILE"
+}
+
+save_state() {
+  local tmp_file ip
   tmp_file="$(mktemp "$BAN_STATE_FILE.XXXXXX")" || return 1
-  while IFS='|' read -r ip exp || [ -n "${ip}${exp}" ]; do
-    [ -z "${ip:-}" ] && continue
-    [ -z "${exp:-}" ] && continue
-    if ! is_uint "$exp"; then
-      continue
-    fi
+  for ip in "${!ST_EXP[@]}"; do
+    printf '%s|%s|%s|%s\n' "$ip" "${ST_EXP[$ip]}" "${ST_COUNT[$ip]}" "${ST_SINCE[$ip]}"
+  done > "$tmp_file"
+  mv -f "$tmp_file" "$BAN_STATE_FILE"   # remplacement atomique
+}
+
+forget_ip() {
+  unset 'ST_EXP[$1]' 'ST_COUNT[$1]' 'ST_SINCE[$1]'
+}
+
+# Ban en cours qui couvre déjà les derniers événements de l'IP : rien à faire, rien à journaliser
+is_banned_for() {
+  local ip="$1" last_ts="$2"
+  [ -n "${ST_EXP[$ip]+x}" ] && [ "${ST_EXP[$ip]}" -gt "$NOW_TS" ] && [ "$last_ts" -le "${ST_SINCE[$ip]}" ]
+}
+
+cleanup_expired_bans() {
+  local ip exp
+  for ip in "${!ST_EXP[@]}"; do
+    exp="${ST_EXP[$ip]}"
     if is_safe_ip "$ip"; then
       # IP ajoutée en whitelist après son ban : on la libère
       ipt "$ip" -D BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1 && log_track "Déblocage (whitelist): $ip"
+      forget_ip "$ip"
       continue
     fi
-    if [ "$exp" -le "$now_ts" ]; then
+    if [ "$exp" -le "$NOW_TS" ]; then
       if ipt "$ip" -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
         ipt "$ip" -D BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1
         log_track "Déblocage expiré: $ip"
       fi
+      forget_ip "$ip"
     else
       # Ban encore valide mais règle absente (redémarrage, flush) : on la réapplique
       if ! ipt "$ip" -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
         if is_valid_ip "$ip" && ipt "$ip" -A BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
-          log_track "Ban restauré depuis l'état: $ip (jusqu'à $exp)"
+          log_track "Ban restauré depuis l'état: $ip (jusqu'à $(format_ymd_hm "$exp"))"
         fi
       fi
-      printf '%s|%s\n' "$ip" "$exp" >> "$tmp_file"
     fi
-  done < "$BAN_STATE_FILE"
-  mv -f "$tmp_file" "$BAN_STATE_FILE"   # remplacement atomique
+  done
 }
 
 ensure_ban_chain() {
@@ -602,25 +644,8 @@ ensure_ban_chain() {
   return 0
 }
 
-update_ban_state() {
-  local target_ip="$1"
-  local expiry="$2"
-  local tmp_file ip exp
-  tmp_file="$(mktemp "$BAN_STATE_FILE.XXXXXX")" || return 1
-  while IFS='|' read -r ip exp || [ -n "${ip}${exp}" ]; do
-    [ -z "${ip:-}" ] && continue
-    [ "$ip" = "$target_ip" ] && continue
-    if is_uint "${exp:-}"; then
-      printf '%s|%s\n' "$ip" "$exp" >> "$tmp_file"
-    fi
-  done < "$BAN_STATE_FILE"
-  printf '%s|%s\n' "$target_ip" "$expiry" >> "$tmp_file"
-  mv -f "$tmp_file" "$BAN_STATE_FILE"   # remplacement atomique
-}
-
 ban_ip() {
   local ip="$1"
-  local until_ts="$2"
   if ! is_valid_ip "$ip"; then
     log_track "Ban refusé: IP invalide ou réservée: \"$ip\""
     return 1
@@ -633,18 +658,18 @@ ban_ip() {
     log_track "Ban refusé: IP privée $ip (reverse proxy ? configurer mod_remoteip, voir README)"
     return 1
   fi
-  if ipt "$ip" -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
-    update_ban_state "$ip" "$until_ts"
-    log_track "IP déjà bannie: règle iptables existante, aucun ajout: $ip (expiration mise à jour: $until_ts)"
-    return 0
+  if ! ipt "$ip" -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
+    if ! ipt "$ip" -A BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
+      log_track "Erreur ban iptables: $ip"
+      return 1
+    fi
   fi
-  if ipt "$ip" -A BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
-    update_ban_state "$ip" "$until_ts"
-    log_track "IP bannie: $ip (jusqu'à $until_ts)"
-    return 0
-  fi
-  log_track "Erreur ban iptables: $ip"
-  return 1
+  ST_COUNT["$ip"]=1
+  ST_SINCE["$ip"]="$NOW_TS"
+  ST_EXP["$ip"]=$((NOW_TS + BAN_DURATION_SECONDS))
+  BAN_UNTIL="${ST_EXP[$ip]}"
+  log_track "IP bannie: $ip (jusqu'à $(format_ymd_hm "$BAN_UNTIL"))"
+  return 0
 }
 
 format_hm() {
@@ -687,7 +712,7 @@ run_follow_mode() {
 
   while :; do
     cycle=$((cycle + 1))
-    "${follow_cmd[@]}"
+    BAN_PATH_FOLLOW_CHILD=1 "${follow_cmd[@]}"
     rc=$?
     if [ "$rc" -ne 0 ]; then
       log_track "Cycle follow en erreur | cycle=$cycle | code=$rc"
@@ -775,6 +800,9 @@ main() {
       --quiet)
         QUIET=1
         ;;
+      --history)
+        HISTORY_MODE=1
+        ;;
       --help)
         print_usage
         return 0
@@ -856,17 +884,17 @@ main() {
   say "Analysé : $analyzed_count fichiers log (error*.log + *access*.log)"
   say "Fenêtre : $WINDOW_MINUTES minutes | Seuil : $THRESHOLD URLs différentes"
 
-  log_track "Démarrage v$VERSION | log-dir=$LOG_DIR | files=\"$LOG_FILES_RAW\" | threshold=$THRESHOLD | window=$WINDOW_MINUTES | ban=$BAN_ENABLED | ban-duration=$BAN_DURATION_MINUTES | quiet=$QUIET | ignore=\"$IGNORE_PATHS_RAW\" | max-log-lines=$MAX_LOG_LINES | max-events=$MAX_EVENTS | lock-dir=$LOCK_DIR"
+  log_routine "Démarrage v$VERSION | log-dir=$LOG_DIR | files=\"$LOG_FILES_RAW\" | threshold=$THRESHOLD | window=$WINDOW_MINUTES | ban=$BAN_ENABLED | ban-duration=$BAN_DURATION_MINUTES | quiet=$QUIET | ignore=\"$IGNORE_PATHS_RAW\" | max-log-lines=$MAX_LOG_LINES | max-events=$MAX_EVENTS | lock-dir=$LOCK_DIR"
 
   if [ "$analyzed_count" -eq 0 ]; then
-    log_track "Aucun fichier log trouvé"
+    log_routine "Aucun fichier log trouvé"
     say "Aucun fichier log à analyser"
     say "(enregistré dans $TRACK_LOG)"
     return 0
   fi
 
   for ip in "${LOG_FILES[@]}"; do
-    log_track "Fichier analysé: $ip"
+    log_routine "Fichier analysé: $ip"
   done
 
   tmp_parsed="$WORK_DIR/parsed"
@@ -881,7 +909,7 @@ main() {
 
   parse_logs_to_tmp "$tmp_parsed"
 
-  local line_kind
+  local line_kind cutoff_ts=$((NOW_TS - WINDOW_SECONDS))
   [ -f "$BAD_PATTERNS_FILE" ] || log_track "Avertissement: $BAD_PATTERNS_FILE absent, aucun ban par signature"
   while IFS=$'\t' read -r line_ts line_ip line_path line_file line_kind || [ -n "${line_ts}${line_ip}${line_path}${line_file}" ]; do
     [ -z "${line_ts:-}" ] && continue
@@ -894,11 +922,6 @@ main() {
     if should_ignore_path "$line_path"; then
       continue
     fi
-    # Signature d'attaque : ban immédiat, sans seuil
-    if [ "${line_kind#sig:}" != "${line_kind:-}" ] && [ -z "${SIG_HIT[$line_ip]+x}" ]; then
-      SIG_HIT["$line_ip"]="${line_kind#sig:} -> $line_path"
-    fi
-
     if [ -n "${TS_CACHE[$line_ts]+x}" ]; then
       unix_ts="${TS_CACHE[$line_ts]}"
     else
@@ -910,6 +933,17 @@ main() {
     [ -z "$unix_ts" ] && continue
     if ! is_uint "$unix_ts"; then
       continue
+    fi
+    # Seuls les événements récents comptent (sinon un vieux scan est re-détecté à chaque cycle)
+    if [ "$HISTORY_MODE" -eq 0 ] && [ "$unix_ts" -lt "$cutoff_ts" ]; then
+      continue
+    fi
+    if [ -z "${LAST_TS[$line_ip]+x}" ] || [ "$unix_ts" -gt "${LAST_TS[$line_ip]}" ]; then
+      LAST_TS["$line_ip"]="$unix_ts"
+    fi
+    # Signature d'attaque : ban immédiat, sans seuil
+    if [ "${line_kind#sig:}" != "${line_kind:-}" ] && [ -z "${SIG_HIT[$line_ip]+x}" ]; then
+      SIG_HIT["$line_ip"]="${line_kind#sig:} -> $line_path"
     fi
     printf '%s|%s|%s\n' "$line_ip" "$unix_ts" "$line_path" >> "$tmp_events"
     total_records=$((total_records + 1))
@@ -1002,6 +1036,7 @@ main() {
       say "Erreur: impossible d'initialiser la chaîne IPTables BAN-PATH-EXPLORER"
       return 1
     fi
+    load_state
     cleanup_expired_bans
   fi
 
@@ -1013,6 +1048,10 @@ main() {
     while IFS= read -r ip || [ -n "$ip" ]; do
       [ -z "$ip" ] && continue
       suspect_count=$((suspect_count + 1))
+      if [ "$BAN_ENABLED" -eq 1 ] && is_banned_for "$ip" "${LAST_TS[$ip]}"; then
+        say "IP déjà bannie : $ip (jusqu'à $(format_hm "${ST_EXP[$ip]}"), aucun nouvel événement)"
+        continue
+      fi
       say "IP suspecte : $ip"
       if [ -n "${BEST_COUNT[$ip]+x}" ]; then
         first_epoch="${BEST_START[$ip]}"
@@ -1033,9 +1072,8 @@ main() {
       fi
 
       if [ "$BAN_ENABLED" -eq 1 ]; then
-        expiry_now=$(( $(date '+%s') + BAN_DURATION_SECONDS ))
-        if ban_ip "$ip" "$expiry_now"; then
-          action_line="ban appliqué ($BAN_DURATION_MINUTES min)"
+        if ban_ip "$ip"; then
+          action_line="ban appliqué jusqu'à $(format_ymd_hm "$BAN_UNTIL")"
         else
           action_line="ban échoué"
         fi
@@ -1046,10 +1084,13 @@ main() {
       log_track "Action pour $ip: $action_line"
     done < <(sort -u "$tmp_suspects")
   fi
+  if [ "$BAN_ENABLED" -eq 1 ]; then
+    save_state
+  fi
 
   if [ "$suspect_count" -eq 0 ]; then
     say "Aucune IP suspecte détectée"
-    log_track "Aucune IP suspecte détectée | lignes_utiles=$total_records"
+    log_routine "Aucune IP suspecte détectée | lignes_utiles=$total_records"
   fi
   if [ "$capped_events" -eq 1 ]; then
     say "Limite atteinte : $MAX_EVENTS événements traités"
@@ -1061,7 +1102,7 @@ main() {
   fi
   say "(enregistré dans $TRACK_LOG)"
 
-  log_track "Fin d'exécution | fichiers=$analyzed_count | lignes_utiles=$total_records | suspects=$suspect_count | seuil_atteint=$threshold_reached"
+  log_routine "Fin d'exécution | fichiers=$analyzed_count | lignes_utiles=$total_records | suspects=$suspect_count | seuil_atteint=$threshold_reached"
 
 }
 
