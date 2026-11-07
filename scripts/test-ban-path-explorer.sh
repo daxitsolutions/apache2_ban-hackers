@@ -116,6 +116,7 @@ prepare_isolated_script_copy() {
     /^TRACK_LOG=/ { print "TRACK_LOG=\"" track "\""; next }
     /^BAN_STATE_FILE=/ { print "BAN_STATE_FILE=\"" state "\""; next }
     /^SAFE_IPS_FILE=/ { print "SAFE_IPS_FILE=\"" state ".safe-ips\""; next }
+    /^LEGACY_SAFE_IPS_FILES=/ { print "LEGACY_SAFE_IPS_FILES=\"\""; next }
     /^REQUIRE_ROOT=/ { print "REQUIRE_ROOT=\"0\""; next }
     /^LOCK_DIR_BASE=/ { print "LOCK_DIR_BASE=\"" state ".lock\""; next }
     /^LEGACY_BAN_STATE_FILE=/ { print "LEGACY_BAN_STATE_FILE=\"" state ".legacy\""; next }
@@ -387,6 +388,7 @@ run_access_tests() {
   grep -F '[pid' "$d/site_access.log" > "$d/error.log"
   grep -vF '[pid' "$d/site_access.log" > "$d/tmp" && mv "$d/tmp" "$d/site_access.log"
   run_isolated "$out" --log-dir "$d" --threshold 5 --window 30
+  ban_check "Whitelist (avertissement sans IP admin)" grep -q "Aucune IP d'administration" "$out"
   ban_check "Access #1 (scan 404 détecté)" grep -qx 'IP suspecte : 203.0.113.9' "$out"
   ban_check "Access #1 (brute force POST détecté)" grep -qx 'IP suspecte : 203.0.113.10' "$out"
   ban_check "Access #1 (visiteur 200 non suspect)" bash -c "! grep -q '203.0.113.12' '$out'"
@@ -402,6 +404,7 @@ run_access_tests() {
   done > "$d/site_access.log"
   : > "$d/error.log"
   run_isolated "$out" --log-dir "$d" --threshold 5 --window 30
+  ban_check "Whitelist (pas d'avertissement si IP admin présente)" bash -c "! grep -q 'Aucune IP d.administration' '$out'"
   ban_check "Whitelist #11 (CIDR IPv4 respecté)" bash -c "! grep -q '198.51.100.77' '$out'"
   ban_check "Whitelist #11 (hors CIDR IPv4 détecté)" grep -qx 'IP suspecte : 198.51.101.1' "$out"
   ban_check "Whitelist #11 (CIDR IPv6 /48 respecté)" bash -c "! grep -q '2001:db8:abcd:1::5' '$out'"
