@@ -176,6 +176,48 @@ Dans les `LogFormat`, remplacez `%h` par `%a` pour l'access log ; l'error log ut
 
 Avec un **CDN public** (Cloudflare…), utilisez `RemoteIPTrustedProxyList` avec la liste des IPs du CDN. Attention : bannir avec iptables n'a alors **aucun effet**, puisque le trafic arrive depuis le CDN. Il faut bloquer au niveau du CDN, ou n'accepter sur 80/443 que les IPs du CDN.
 
+
+### Protection proactive : fail2ban, ModSecurity, CrowdSec
+
+`ban-path-explorer.sh` réagit aux attaques déjà subies. Ces trois outils complètent la protection : ils couvrent SSH, bloquent l'exploit dès la première requête, et bloquent les IPs connues comme malveillantes avant même qu'elles n'arrivent.
+
+**1. fail2ban** : brute force SSH/HTTP, bots, Shellshock, récidive (configuration testée : `config/fail2ban/jail.d/ban-hackers.local`)
+
+```bash
+sudo apt install fail2ban
+sudo cp config/fail2ban/jail.d/ban-hackers.local /etc/fail2ban/jail.d/
+sudo nano /etc/fail2ban/jail.d/ban-hackers.local   # ignoreip = vos IPs d'administration
+sudo fail2ban-client -t && sudo systemctl restart fail2ban
+sudo fail2ban-client status
+```
+
+**2. ModSecurity + OWASP CRS** (pare-feu applicatif) : bloque SQLi, XSS, LFI et RCE même depuis une IP inconnue. Chaque requête bloquée (`ModSecurity: Access denied`) déclenche aussi un ban par `ban-path-explorer.sh`.
+
+```bash
+sudo apt install libapache2-mod-security2 modsecurity-crs
+sudo cp /etc/modsecurity/modsecurity.conf-recommended /etc/modsecurity/modsecurity.conf
+sudo apache2ctl configtest && sudo systemctl reload apache2
+```
+
+Le moteur démarre en `SecRuleEngine DetectionOnly` : il journalise sans bloquer. Laissez-le ainsi **1 à 2 semaines** et cherchez les faux positifs avec `grep ModSecurity /var/log/apache2/*error.log`. Ensuite, activez le blocage :
+
+```bash
+sudo sed -i 's/^SecRuleEngine .*/SecRuleEngine On/' /etc/modsecurity/modsecurity.conf
+sudo systemctl reload apache2
+```
+
+**3. CrowdSec** : blocklist communautaire. Les IPs vues en train d'attaquer d'autres serveurs sont bloquées chez vous **avant leur première requête**. C'est la seule protection contre les scans distribués.
+
+```bash
+curl -s https://install.crowdsec.net | sudo sh       # dépôt officiel CrowdSec
+sudo apt install crowdsec crowdsec-firewall-bouncer-iptables
+sudo cscli collections install crowdsecurity/apache2 crowdsecurity/sshd
+sudo systemctl reload crowdsec
+sudo cscli metrics && sudo cscli decisions list
+```
+
+Pensez à déclarer vos IPs d'administration dans une whitelist CrowdSec (`/etc/crowdsec/parsers/s02-enrich/`, voir la documentation CrowdSec).
+
 ---
 
 ## English
@@ -242,3 +284,9 @@ Only events from the last `--window` minutes are considered. To investigate a pa
 ### Behind a reverse proxy / CDN (important)
 
 Behind nginx, HAProxy, a load balancer or Cloudflare, logs show the **proxy IP**, not the attacker's. As a safety net the script refuses to ban private IPs (10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16, fc00::/7, fe80::/10) and logs `Ban refusé: IP privée`. If you see it, enable `mod_remoteip` (`RemoteIPHeader X-Forwarded-For` + `RemoteIPTrustedProxy <your proxies>`) and use `%a` instead of `%h` in `LogFormat`. With a public CDN, iptables bans are useless (traffic comes from the CDN): block at the CDN level.
+
+### Proactive protection: fail2ban, ModSecurity, CrowdSec
+
+- **fail2ban** (tested config): `sudo apt install fail2ban && sudo cp config/fail2ban/jail.d/ban-hackers.local /etc/fail2ban/jail.d/ && sudo systemctl restart fail2ban`. Set `ignoreip` first.
+- **ModSecurity + OWASP CRS**: `sudo apt install libapache2-mod-security2 modsecurity-crs`, copy `modsecurity.conf-recommended` to `modsecurity.conf`, run in `DetectionOnly` for 1–2 weeks, then `SecRuleEngine On`. Every block (`ModSecurity: Access denied`) also triggers a `ban-path-explorer.sh` ban.
+- **CrowdSec** (community blocklist, blocks known-bad IPs before their first request): `curl -s https://install.crowdsec.net | sudo sh && sudo apt install crowdsec crowdsec-firewall-bouncer-iptables && sudo cscli collections install crowdsecurity/apache2 crowdsecurity/sshd`.

@@ -474,6 +474,7 @@ parse_logs_to_tmp() {
           if (line ~ /\[[^]]*error\]/ &&
               (line ~ /File does not exist: / ||
                line ~ /AH01276:/ ||
+               line ~ /ModSecurity: Access denied/ ||
                line ~ /script .* not found or unable to stat/)) {
             ts=""
             ip=""
@@ -521,7 +522,17 @@ parse_logs_to_tmp() {
               continue
             }
             pos=index(line, "File does not exist: ")
-            if (pos > 0) {
+            modsec = 0
+            if (index(line, "ModSecurity: Access denied") > 0) {
+              # Requête bloquée par le WAF : chemin dans [uri "..."], ban immédiat
+              modsec = 1
+              path = "/"
+              u = index(line, "[uri \"")
+              if (u > 0) {
+                path = substr(line, u + 6)
+                path = substr(path, 1, index(path, "\"") - 1)
+              }
+            } else if (pos > 0) {
               path=substr(line, pos + length("File does not exist: "))
             } else {
               pos2=index(line, "AH01276:")
@@ -541,7 +552,7 @@ parse_logs_to_tmp() {
                 }
               }
             }
-            hit = sig(path)
+            hit = modsec ? "modsecurity" : sig(path)
             print ts "\t" ip "\t" path "\t" FILENAME (hit != "" ? "\tsig:" hit : "")
           }
           i++

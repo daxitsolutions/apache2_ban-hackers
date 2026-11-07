@@ -420,6 +420,11 @@ run_access_tests() {
   ban_check "Signature #2 (SQLi encodée)" grep -qx 'IP suspecte : 198.51.100.21' "$out"
   ban_check "Signature #2 (Log4Shell dans le User-Agent)" grep -qx 'IP suspecte : 198.51.100.22' "$out"
   ban_check "Signature #2 (/.git/ dans error.log)" grep -qx 'IP suspecte : 198.51.100.24' "$out"
+  printf '[%s] [security2:error] [pid 20:tid 26] [client 198.51.100.25:54296] ModSecurity: Access denied with code 403 (phase 2). Operator GE matched 5 at TX:anomaly_score. [id "949110"] [hostname "x"] [uri "/index.php"] [unique_id "abc"]\n' \
+    "$(LC_ALL=C date -d "@$(ts_of 1)" '+%a %b %d %H:%M:%S.000000 %Y')" >> "$d/error.log"
+  run_isolated "$out" --log-dir "$d" --threshold 5 --window 30
+  ban_check "Signature #13 (blocage ModSecurity = suspect)" grep -qx 'IP suspecte : 198.51.100.25' "$out"
+  ban_check "Signature #13 (motif modsecurity affiché)" grep -q 'Signature d.attaque : modsecurity -> /index.php' "$out"
   ban_check "Signature #2 (URL légitime non bannie)" bash -c "! grep -q '198.51.100.23' '$out'"
 }
 
