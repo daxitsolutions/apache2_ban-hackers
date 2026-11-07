@@ -19,6 +19,7 @@ VERSION="1.0"
 SCRIPT_NAME="$(basename "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SAFE_IPS_FILE="$SCRIPT_DIR/safe-ips.txt"
+BAD_PATTERNS_FILE="$SCRIPT_DIR/bad-patterns.txt"
 TRACK_LOG="/var/log/ban-path-explorer.log"
 BAN_STATE_FILE="/var/lib/ban-path-explorer/state"
 LEGACY_BAN_STATE_FILE="/var/log/ban-path-explorer.state"
@@ -62,6 +63,7 @@ declare -A BEST_END=()
 declare -A BEST_PATHS=()
 declare -A BEST_TOTAL_EVENTS=()
 declare -A TS_CACHE=()
+declare -A SIG_HIT=()
 RUNNING_PID=""
 
 print_usage() {
@@ -303,7 +305,21 @@ parse_logs_to_tmp() {
   local f
   : > "$out_file"
   for f in "${LOG_FILES[@]}"; do
-    awk -v max="$MAX_LOG_LINES" '
+    awk -v max="$MAX_LOG_LINES" -v pf="$BAD_PATTERNS_FILE" '
+      BEGIN {
+        # Signatures à ban immédiat (sous-chaînes, insensibles à la casse)
+        np = 0
+        while ((getline p < pf) > 0) {
+          sub(/[[:space:]]+$/, "", p)
+          if (p == "" || substr(p, 1, 1) == "#") continue
+          pat[++np] = tolower(p)
+        }
+      }
+      function sig(s,   k) {
+        s = tolower(s)
+        for (k = 1; k <= np; k++) if (index(s, pat[k]) > 0) return pat[k]
+        return ""
+      }
       {
         buf[NR % max] = $0
       }
@@ -332,7 +348,11 @@ parse_logs_to_tmp() {
             url = r[2]
             sub(/\?.*/, "", url)
             if (url == "") { i++; continue }
-            if (status ~ /^(400|403|404|405)$/) {
+            # requête + statut + referer + user-agent : Log4Shell/Shellshock passent par les en-têtes
+            hit = sig(rest)
+            if (hit != "") {
+              print ts "\t" ip "\t" url "\t" FILENAME "\tsig:" hit
+            } else if (status ~ /^(400|403|404|405)$/) {
               print ts "\t" ip "\t" url "\t" FILENAME
             } else if (r[1] == "POST" && url ~ /(wp-login|xmlrpc)\.php$/) {
               # ponytail: brute force = N POST distincts (le compteur porte sur les chemins uniques)
@@ -411,7 +431,8 @@ parse_logs_to_tmp() {
                 }
               }
             }
-            print ts "\t" ip "\t" path "\t" FILENAME
+            hit = sig(path)
+            print ts "\t" ip "\t" path "\t" FILENAME (hit != "" ? "\tsig:" hit : "")
           }
           i++
         }
@@ -790,7 +811,9 @@ main() {
 
   parse_logs_to_tmp "$tmp_parsed"
 
-  while IFS=$'\t' read -r line_ts line_ip line_path line_file || [ -n "${line_ts}${line_ip}${line_path}${line_file}" ]; do
+  local line_kind
+  [ -f "$BAD_PATTERNS_FILE" ] || log_track "Avertissement: $BAD_PATTERNS_FILE absent, aucun ban par signature"
+  while IFS=$'\t' read -r line_ts line_ip line_path line_file line_kind || [ -n "${line_ts}${line_ip}${line_path}${line_file}" ]; do
     [ -z "${line_ts:-}" ] && continue
     [ -z "${line_ip:-}" ] && continue
     [ -z "${line_path:-}" ] && continue
@@ -800,6 +823,10 @@ main() {
     fi
     if should_ignore_path "$line_path"; then
       continue
+    fi
+    # Signature d'attaque : ban immédiat, sans seuil
+    if [ "${line_kind#sig:}" != "${line_kind:-}" ] && [ -z "${SIG_HIT[$line_ip]+x}" ]; then
+      SIG_HIT["$line_ip"]="${line_kind#sig:} -> $line_path"
     fi
 
     if [ -n "${TS_CACHE[$line_ts]+x}" ]; then
@@ -909,7 +936,7 @@ main() {
     cleanup_expired_bans
   fi
 
-  for ip in "${!BEST_COUNT[@]}"; do
+  for ip in "${!BEST_COUNT[@]}" "${!SIG_HIT[@]}"; do
     printf '%s\n' "$ip" >> "$tmp_suspects"
   done
 
@@ -917,20 +944,24 @@ main() {
     while IFS= read -r ip || [ -n "$ip" ]; do
       [ -z "$ip" ] && continue
       suspect_count=$((suspect_count + 1))
-      first_epoch="${BEST_START[$ip]}"
-      last_epoch="${BEST_END[$ip]}"
-      unique_count="${BEST_COUNT[$ip]}"
-      first_paths="${BEST_PATHS[$ip]}"
-
       say "IP suspecte : $ip"
-      say "→ $unique_count URLs différentes entre $(format_hm "$first_epoch") et $(format_hm "$last_epoch")"
-      if [ -n "$first_paths" ]; then
-        say "Chemins : $first_paths"
-      else
-        say "Chemins : (aucun aperçu disponible)"
+      if [ -n "${BEST_COUNT[$ip]+x}" ]; then
+        first_epoch="${BEST_START[$ip]}"
+        last_epoch="${BEST_END[$ip]}"
+        unique_count="${BEST_COUNT[$ip]}"
+        first_paths="${BEST_PATHS[$ip]}"
+        say "→ $unique_count URLs différentes entre $(format_hm "$first_epoch") et $(format_hm "$last_epoch")"
+        if [ -n "$first_paths" ]; then
+          say "Chemins : $first_paths"
+        else
+          say "Chemins : (aucun aperçu disponible)"
+        fi
+        log_track "IP suspecte: $ip | unique_urls=$unique_count | events_window=${BEST_TOTAL_EVENTS[$ip]} | from=$(format_ymd_hm "$first_epoch") | to=$(format_ymd_hm "$last_epoch") | paths=\"$first_paths\""
       fi
-
-      log_track "IP suspecte: $ip | unique_urls=$unique_count | events_window=${BEST_TOTAL_EVENTS[$ip]} | from=$(format_ymd_hm "$first_epoch") | to=$(format_ymd_hm "$last_epoch") | paths=\"$first_paths\""
+      if [ -n "${SIG_HIT[$ip]+x}" ]; then
+        say "→ Signature d'attaque : ${SIG_HIT[$ip]}"
+        log_track "IP suspecte: $ip | signature=\"${SIG_HIT[$ip]}\""
+      fi
 
       if [ "$BAN_ENABLED" -eq 1 ]; then
         expiry_now=$(( $(date '+%s') + BAN_DURATION_SECONDS ))

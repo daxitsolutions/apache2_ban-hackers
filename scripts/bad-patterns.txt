@@ -1,0 +1,44 @@
+# Signatures à ban immédiat (1 seule requête suffit).
+# Une sous-chaîne par ligne, insensible à la casse, cherchée dans :
+#   - access log : requête + code + referer + user-agent
+#   - error log  : chemin du fichier demandé
+# Ajoutez/retirez selon vos sites (attention aux faux positifs).
+
+# Fichiers sensibles / secrets
+/.env
+/.git/
+/.svn/
+/.aws/
+/.ssh/
+/.htpasswd
+/wp-config.php.
+/phpinfo.php
+
+# Exploits connus
+eval-stdin.php
+/boaform/
+/hnap1
+/cgi-bin/luci
+/solr/admin
+/actuator/
+/autodiscover/autodiscover.xml
+
+# Path traversal / LFI
+../
+..%2f
+%2e%2e
+/etc/passwd
+/proc/self/environ
+php://input
+php://filter
+
+# Injections (SQL, XSS, RCE)
+union select
+union+select
+union%20select
+<script
+%3cscript
+base64_decode(
+${jndi:
+%24%7bjndi
+() {

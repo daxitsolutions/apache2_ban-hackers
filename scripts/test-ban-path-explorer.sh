@@ -111,6 +111,7 @@ copy_error_logs_limited() {
 
 prepare_isolated_script_copy() {
   cp -- "$SCRIPT_UNDER_TEST" "$TMP_SCRIPT_COPY" || return 1
+  cp -- "$(dirname "$SCRIPT_UNDER_TEST")/bad-patterns.txt" "$TMP_DIR/" || return 1
   awk -v track="$TMP_TRACK_LOG" -v state="$TMP_BAN_STATE" '
     /^TRACK_LOG=/ { print "TRACK_LOG=\"" track "\""; next }
     /^BAN_STATE_FILE=/ { print "BAN_STATE_FILE=\"" state "\""; next }
@@ -381,6 +382,21 @@ run_access_tests() {
   ban_check "Access #1 (brute force POST détecté)" grep -qx 'IP suspecte : 203.0.113.10' "$out"
   ban_check "Access #1 (visiteur 200 non suspect)" bash -c "! grep -q '203.0.113.12' '$out'"
   ban_check "Access #1 (404 error+access comptés une fois)" bash -c "! grep -q '203.0.113.11' '$out'"
+
+  # #2 : une seule requête malveillante suffit
+  {
+    acc 198.51.100.20 1 "GET /.env" 404
+    acc 198.51.100.21 1 'GET /?q=1%20UNION%20SELECT%20pass' 200
+    printf '%s - - [06/Apr/2026:18:01:00 +0000] "GET / HTTP/1.1" 200 1 "-" "${jndi:ldap://x.example/a}"\n' 198.51.100.22
+    acc 198.51.100.23 1 "GET /blog/env-config" 200
+  } > "$d/site_access.log"
+  php_err "198.51.100.24:999" ".git/HEAD" 1 > "$d/error.log"
+  run_isolated "$out" --log-dir "$d" --threshold 5 --window 30
+  ban_check "Signature #2 (/.env)" grep -qx 'IP suspecte : 198.51.100.20' "$out"
+  ban_check "Signature #2 (SQLi encodée)" grep -qx 'IP suspecte : 198.51.100.21' "$out"
+  ban_check "Signature #2 (Log4Shell dans le User-Agent)" grep -qx 'IP suspecte : 198.51.100.22' "$out"
+  ban_check "Signature #2 (/.git/ dans error.log)" grep -qx 'IP suspecte : 198.51.100.24' "$out"
+  ban_check "Signature #2 (URL légitime non bannie)" bash -c "! grep -q '198.51.100.23' '$out'"
 }
 
 run_ban_tests() {
@@ -422,6 +438,13 @@ run_ban_tests() {
   run_isolated "$out" --log-dir "$d" --ban
   ban_check "Ban #5 (whitelist ajoutée = déblocage)" bash -c "! iptables -w -S BAN-PATH-EXPLORER | grep -q 198.51.100.7"
   prepare_safe_ips_for_test
+
+  # #2 : une signature déclenche le ban iptables sans seuil
+  reset_bans
+  acc 198.51.100.20 1 "GET /.env" 404 > "$d/site_access.log"
+  run_isolated "$out" --log-dir "$d" --ban
+  ban_check "Ban #2 (signature = ban iptables immédiat)" has_rule iptables "198.51.100.20/32"
+  rm -f "$d/site_access.log"
 }
 
 early_help_return "$@"
