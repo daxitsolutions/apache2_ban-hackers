@@ -44,7 +44,7 @@ Tu verras notamment :
 
 - `ban-path-explorer.sh`
 - `test-ban-path-explorer.sh`
-- `safe-ips.txt`
+- `safe-ips.example.txt`
 
 ### Commandes utiles une fois cloné
 
@@ -60,6 +60,13 @@ Tu verras notamment :
 ```
 
 ### Mise à jour du repository
+
+> ⚠️ **Mise à jour depuis une version antérieure à #11** : `scripts/safe-ips.txt` n'est plus versionné. **Avant** `git pull`, sauvegardez votre whitelist :
+>
+> ```bash
+> sudo install -D -m 600 scripts/safe-ips.txt /etc/ban-path-explorer/safe-ips.txt
+> git checkout -- scripts/safe-ips.txt && git pull
+> ```
 
 Une fois dans le dossier du repo :
 
@@ -98,7 +105,7 @@ Tous les scripts sont centralisés dans `scripts/` pour faciliter l'ajout de nou
 
 - `scripts/ban-path-explorer.sh` : détection de scans de chemins dans les logs Apache
 - `scripts/test-ban-path-explorer.sh` : tests du script principal
-- `scripts/safe-ips.txt` : whitelist d'IPs utilisée par les scripts qui en ont besoin
+- `scripts/safe-ips.example.txt` : modèle de whitelist. La vraie whitelist est dans `/etc/ban-path-explorer/safe-ips.txt`, **hors du repo** pour ne pas publier vos IPs. Elle accepte les IPs, les plages CIDR (`198.51.100.0/24`, `2001:db8::/48`) et les commentaires `#`
 - `scripts/bad-patterns.txt` : signatures d'attaque (`/.env`, `../`, `${jndi:`, `union select`…) qui déclenchent un ban dès la première requête
 
 ### Usage générique (plusieurs scripts)
@@ -139,7 +146,7 @@ Tests :
 
 ### Service permanent (bans conservés après redémarrage)
 
-Les bans actifs sont stockés dans `/var/lib/ban-path-explorer/state`. À chaque cycle avec `--ban`, les règles absentes (après un redémarrage ou un flush) sont réappliquées. Une IP ajoutée à `safe-ips.txt` est débloquée au cycle suivant.
+Les bans actifs sont stockés dans `/var/lib/ban-path-explorer/state`. À chaque cycle avec `--ban`, les règles absentes (après un redémarrage ou un flush) sont réappliquées. Une IP ajoutée à `/etc/ban-path-explorer/safe-ips.txt` est débloquée au cycle suivant.
 
 ```bash
 sudo git clone https://github.com/daxitsolutions/apache2_ban-hackers.git /opt/apache2_ban-hackers
@@ -178,7 +185,7 @@ All scripts are grouped under `scripts/` so new tools can be added consistently.
 
 - `scripts/ban-path-explorer.sh`: detects path-scanning behavior in Apache logs
 - `scripts/test-ban-path-explorer.sh`: test runner for the main script
-- `scripts/safe-ips.txt`: IP whitelist used by scripts that require it
+- `scripts/safe-ips.example.txt`: whitelist template. The real whitelist lives in `/etc/ban-path-explorer/safe-ips.txt`, **outside the repo**, so your IPs are not published. Supports IPs, CIDR ranges and `#` comments
 - `scripts/bad-patterns.txt`: attack signatures (`/.env`, `../`, `${jndi:`, `union select`…) that trigger a ban on the very first request
 
 ### Generic usage (multiple scripts)
@@ -218,7 +225,7 @@ Tests:
 
 ### Permanent service (bans survive reboots)
 
-Active bans are stored in `/var/lib/ban-path-explorer/state`. On every `--ban` cycle, missing rules (after a reboot or flush) are re-applied. An IP added to `safe-ips.txt` is unbanned on the next cycle.
+Active bans are stored in `/var/lib/ban-path-explorer/state`. On every `--ban` cycle, missing rules (after a reboot or flush) are re-applied. An IP added to `/etc/ban-path-explorer/safe-ips.txt` is unbanned on the next cycle.
 
 ```bash
 sudo git clone https://github.com/daxitsolutions/apache2_ban-hackers.git /opt/apache2_ban-hackers
