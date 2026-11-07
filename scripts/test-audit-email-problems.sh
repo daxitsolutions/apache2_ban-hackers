@@ -33,6 +33,9 @@ check "MTA-STS présent"   "_mta-sts.ex.test|v=STSv1; id=1"              "MTA-ST
 # sélecteur passé en argument
 printf 's9._domainkey.ex.test|v=DKIM1; k=rsa; p=MIIBIjAN\n' > "$T/records"
 if PATH="$T:$PATH" ./scripts/audit-email-problems.sh ex.test s9 | grep -q "sélecteur : s9"; then echo "DKIM sélecteur en argument : OK"; else echo "DKIM sélecteur en argument : FAIL"; FAIL=$((FAIL + 1)); fi
-if ./scripts/audit-email-problems.sh >/dev/null 2>&1; then echo "Sans domaine = erreur : FAIL"; FAIL=$((FAIL + 1)); else echo "Sans domaine = erreur : OK"; fi
+printf 'EX.test\ns9\n' > "$T/answers"
+if PATH="$T:$PATH" ./scripts/audit-email-problems.sh < "$T/answers" | grep -q "sélecteur : s9"; then echo "Domaine et sélecteur demandés au lancement : OK"; else echo "Domaine et sélecteur demandés au lancement : FAIL"; FAIL=$((FAIL + 1)); fi
+if ./scripts/audit-email-problems.sh "pas un domaine" </dev/null >/dev/null 2>&1; then echo "Domaine invalide = erreur : FAIL"; FAIL=$((FAIL + 1)); else echo "Domaine invalide = erreur : OK"; fi
+if ./scripts/audit-email-problems.sh </dev/null >/dev/null 2>&1; then echo "Sans domaine = erreur : FAIL"; FAIL=$((FAIL + 1)); else echo "Sans domaine = erreur : OK"; fi
 
 [ "$FAIL" -eq 0 ] && echo "Tous les tests sont passés." || { echo "$FAIL test(s) en échec."; exit 1; }

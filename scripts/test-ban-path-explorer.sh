@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Usage : ./scripts/test-ban-path-explorer.sh
+# Usage : sudo ./scripts/test-ban-path-explorer.sh
 # Lance une batterie de tests isolée sur ban-path-explorer.sh
 # sans jamais modifier les fichiers permanents du système.
 
@@ -116,6 +116,7 @@ prepare_isolated_script_copy() {
     /^TRACK_LOG=/ { print "TRACK_LOG=\"" track "\""; next }
     /^BAN_STATE_FILE=/ { print "BAN_STATE_FILE=\"" state "\""; next }
     /^SAFE_IPS_FILE=/ { print "SAFE_IPS_FILE=\"" state ".safe-ips\""; next }
+    /^REQUIRE_ROOT=/ { print "REQUIRE_ROOT=\"0\""; next }
     /^LOCK_DIR_BASE=/ { print "LOCK_DIR_BASE=\"" state ".lock\""; next }
     /^LEGACY_BAN_STATE_FILE=/ { print "LEGACY_BAN_STATE_FILE=\"" state ".legacy\""; next }
     { print }
@@ -548,6 +549,10 @@ early_help_return "$@"
 if [ "$?" -eq 0 ]; then
   :
 else
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "Erreur : lancez les tests avec sudo (lecture des logs Apache réels) : sudo $0" >&2
+    exit 1
+  fi
   trap cleanup EXIT
   run_tests || FAIL_COUNT=$((FAIL_COUNT + 1))
   run_access_tests

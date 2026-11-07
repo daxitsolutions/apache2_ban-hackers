@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 #
-# Usage : ban-path-explorer.sh [options]
+# Usage : sudo ./ban-path-explorer.sh [options]     (root obligatoire, sauf --help)
 # Exemples :
-#   ./ban-path-explorer.sh
-#   nohup ./ban-path-explorer.sh --log-dir /var/log/apache2 > /var/log/ban-path-explorer.out 2>&1 &
-#   ./ban-path-explorer.sh --log-dir /var/log/apache2 --threshold 25 --window 20
-#   ./ban-path-explorer.sh --log-files "error.log error_site.log" --ignore-paths "favicon.ico,robots.txt"
-#   ./ban-path-explorer.sh --ban --ban-duration 60
+#   sudo ./ban-path-explorer.sh                              # analyse sans bannir (dry-run)
+#   sudo ./ban-path-explorer.sh --history                    # enquête sur tout l'historique lu
+#   sudo ./ban-path-explorer.sh --threshold 25 --window 20
+#   sudo ./ban-path-explorer.sh --log-files "error.log site-error.log" --ignore-paths "favicon.ico,robots.txt"
+#   sudo ./ban-path-explorer.sh --ban                        # bannit
+#   sudo ./ban-path-explorer.sh --follow --ban --quiet       # surveillance continue (cf. service systemd)
 #
 # Whitelist : /etc/ban-path-explorer/safe-ips.txt (IPs, plages CIDR, # commentaires).
 # Modèle : scripts/safe-ips.example.txt
 
 set -u
 
-VERSION="1.0"
+VERSION="2.0"
+REQUIRE_ROOT="1"   # mis à 0 uniquement par le script de test (copie isolée)
 SCRIPT_NAME="$(basename "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SAFE_IPS_FILE="/etc/ban-path-explorer/safe-ips.txt"   # hors du repo : vos IPs ne sont pas publiées
@@ -80,10 +82,10 @@ WORK_DIR=""
 
 print_usage() {
   cat <<EOF
-Usage: $SCRIPT_NAME [options]
+Usage: sudo ./$SCRIPT_NAME [options]
 
-Exécution en arrière-plan:
-  nohup ./$SCRIPT_NAME --log-dir $DEFAULT_LOG_DIR > /var/log/ban-path-explorer.out 2>&1 &
+Sans --ban, le script analyse et affiche les IPs suspectes sans rien bloquer (dry-run).
+Surveillance permanente : installer scripts/ban-path-explorer.service (voir README)
 
 Options:
   --log-dir DIR            Dossier des logs Apache (défaut: $DEFAULT_LOG_DIR)
@@ -789,6 +791,7 @@ main() {
   local action_line
   local expiry_now
   local capped_events=0
+  local orig_args="$*"
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -889,6 +892,12 @@ main() {
   fi
   if ! is_uint "$FOLLOW_INTERVAL_SECONDS" || [ "$FOLLOW_INTERVAL_SECONDS" -eq 0 ]; then
     printf 'Erreur: --follow-interval doit être un entier positif\n' >&2
+    return 1
+  fi
+
+  if [ "$REQUIRE_ROOT" = "1" ] && [ "$(id -u)" -ne 0 ]; then
+    printf 'Erreur : ce script doit être lancé avec sudo (accès aux logs Apache, iptables, /var/lib, /run).\n' >&2
+    printf '  sudo %s %s\n' "$0" "$orig_args" >&2
     return 1
   fi
 

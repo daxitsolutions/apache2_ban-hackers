@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# Usage : ./scripts/audit-email-problems.sh DOMAINE [SELECTEUR_DKIM ...]
-# Exemples :
-#   ./scripts/audit-email-problems.sh daxit.be
-#   ./scripts/audit-email-problems.sh example.com s1 s2      # sélecteurs DKIM supplémentaires
-# Vérifie SPF, DMARC, DKIM, MTA-STS et TLS-RPT (lecture DNS uniquement).
+# Usage : ./scripts/audit-email-problems.sh [DOMAINE] [SELECTEUR_DKIM ...]
+# Sans argument, le domaine (et d'éventuels sélecteurs DKIM) est demandé au lancement.
+#   ./scripts/audit-email-problems.sh                         # mode interactif
+#   ./scripts/audit-email-problems.sh exemple.com s1 s2       # sélecteurs DKIM supplémentaires
+# Vérifie SPF, DMARC, DKIM, MTA-STS et TLS-RPT (lecture DNS uniquement, sudo inutile).
 
 set -u
 
@@ -15,11 +15,26 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 DOMAIN="${1:-}"
-if [ -z "$DOMAIN" ] || [ "$DOMAIN" = "-h" ] || [ "$DOMAIN" = "--help" ]; then
-  sed -n '3,7p' "$0"
-  [ -n "$DOMAIN" ]; exit $?
+case "$DOMAIN" in
+  -h|--help) sed -n '3,7p' "$0"; exit 0 ;;
+esac
+[ $# -gt 0 ] && shift
+declare -a EXTRA_SELECTORS=("$@")
+if [ -z "$DOMAIN" ]; then
+  # read -p n'affiche la question que sur un terminal ; depuis un pipe, les réponses sont lues telles quelles
+  read -rp "Domaine à auditer (ex. exemple.com) : " DOMAIN
+  read -rp "Sélecteurs DKIM supplémentaires, séparés par des espaces (Entrée pour ignorer) : " -a EXTRA_SELECTORS
 fi
-shift
+DOMAIN="$(printf '%s' "$DOMAIN" | tr -d '[:space:]' | tr 'A-Z' 'a-z')"
+if [ -z "$DOMAIN" ]; then
+  echo "Erreur : aucun domaine indiqué." >&2
+  sed -n '3,7p' "$0" >&2
+  exit 1
+fi
+if ! [[ $DOMAIN =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$ ]]; then
+  echo "Erreur : domaine invalide : $DOMAIN" >&2
+  exit 1
+fi
 if ! command -v dig >/dev/null 2>&1; then
   echo "Erreur : dig est requis (sudo apt install dnsutils)" >&2
   exit 1
@@ -81,7 +96,7 @@ sep
 # 3. DKIM
 echo -e "${BLUE}[3/5] DKIM${NC}"
 echo "Sélecteurs testés : courants (One.com, Microsoft 365, Google, génériques) + ceux passés en argument."
-SELECTORS=(one key1 key2 20201015 20230601 selector1 selector2 google default mail smtp dkim s1 s2 k1 "$@")
+SELECTORS=(one key1 key2 20201015 20230601 selector1 selector2 google default mail smtp dkim s1 s2 k1 ${EXTRA_SELECTORS[@]+"${EXTRA_SELECTORS[@]}"})
 FOUND_DKIM=0
 for selector in "${SELECTORS[@]}"; do
   DKIM_RECORD="$(txt "${selector}._domainkey.$DOMAIN" | tr -d '[:space:]')"

@@ -1,6 +1,6 @@
 # apache2_ban-hackers
 
-## Language / Langue
+Boîte à outils shell pour protéger un serveur web Apache (Debian/Ubuntu, compatible RHEL) : détection et blocage automatique des attaquants à partir des logs, configurations de durcissement prêtes à l'emploi et audits de sécurité.
 
 - [Français](#français)
 - [English](#english)
@@ -9,160 +9,126 @@
 
 ## Français
 
-Collection de scripts shell pour la sécurité et l'observabilité Apache.
+### Ce que fait le projet
 
-### Clonage du repository
+| Outil | Rôle |
+|---|---|
+| `scripts/ban-path-explorer.sh` | Analyse les logs Apache (error + access) et **bannit** via iptables/ip6tables les IPs qui scannent le site, font du brute force ou envoient une requête d'attaque connue |
+| `scripts/audit-compromise.sh` | Après une attaque : recherche les traces de compromission (comptes, clés SSH, webshells, processus suspects…), **en lecture seule** |
+| `scripts/audit-email-problems.sh` | Vérifie la protection anti-usurpation d'un domaine : SPF, DMARC, DKIM, MTA-STS, TLS-RPT |
+| `config/` | Configurations testées : fail2ban, durcissement Apache et SSH, logrotate |
 
-Voici les étapes exactes pour cloner le repo `https://github.com/daxitsolutions/apache2_ban-hackers` :
+Les scripts qui touchent au système (`ban-path-explorer.sh`, `audit-compromise.sh` et les tests) **doivent être lancés avec `sudo`** ; ils refusent de démarrer sinon. `audit-email-problems.sh` ne fait que des requêtes DNS et se lance sans sudo.
 
-1. Installer Git (si ce n'est pas déjà fait) :
+---
 
-```bash
-sudo apt update
-sudo apt install git -y
-```
+### Démarrage rapide (10 minutes)
 
-2. Cloner le repository :
-
-```bash
-git clone https://github.com/daxitsolutions/apache2_ban-hackers.git
-```
-
-3. Aller dans le dossier cloné :
+**1. Installer** (dans `/opt`, emplacement attendu par le service systemd)
 
 ```bash
-cd apache2_ban-hackers
-```
-
-4. Voir ce qu'il contient :
-
-```bash
-ls -l scripts/
-```
-
-Tu verras notamment :
-
-- `ban-path-explorer.sh`
-- `test-ban-path-explorer.sh`
-- `safe-ips.example.txt`
-
-### Commandes utiles une fois cloné
-
-```bash
-# Voir l'aide du script principal
-./scripts/ban-path-explorer.sh --help
-
-# Lancer le test (recommandé)
-./scripts/test-ban-path-explorer.sh
-
-# Exemple d'utilisation du script de ban
-./scripts/ban-path-explorer.sh --log-dir /var/log/apache2 --threshold 20 --window 30
-```
-
-### Mise à jour du repository
-
-> ⚠️ **Mise à jour depuis une version antérieure à #11** : `scripts/safe-ips.txt` n'est plus versionné. **Avant** `git pull`, sauvegardez votre whitelist :
->
-> ```bash
-> sudo install -D -m 600 scripts/safe-ips.txt /etc/ban-path-explorer/safe-ips.txt
-> git checkout -- scripts/safe-ips.txt && git pull
-> ```
-
-Une fois dans le dossier du repo :
-
-```bash
-cd ~/apache2_ban-hackers   # ou le chemin où tu l'as cloné
-git pull
-```
-
-`git pull` récupère les dernières modifications (nouveaux scripts, corrections, mises à jour de `ban-path-explorer.sh`, etc.).
-
-Commandes pratiques pour l'update :
-
-```bash
-# 1. Aller dans le dossier
-cd apache2_ban-hackers
-
-# 2. Mettre à jour
-git pull
-
-# 3. (Optionnel) Voir ce qui a changé
-git log --oneline -5
-```
-
-Astuce : alias rapide
-
-```bash
-echo 'alias update-ban="cd ~/apache2_ban-hackers && git pull"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-Ensuite, tu peux lancer `update-ban` depuis n'importe où.
-
-### Structure du projet
-
-Tous les scripts sont centralisés dans `scripts/` pour faciliter l'ajout de nouveaux outils.
-
-- `scripts/ban-path-explorer.sh` : détection de scans de chemins dans les logs Apache
-- `scripts/test-ban-path-explorer.sh` : tests du script principal
-- `scripts/safe-ips.example.txt` : modèle de whitelist. La vraie whitelist est dans `/etc/ban-path-explorer/safe-ips.txt`, **hors du repo** pour ne pas publier vos IPs. Elle accepte les IPs, les plages CIDR (`198.51.100.0/24`, `2001:db8::/48`) et les commentaires `#`
-- `scripts/audit-email-problems.sh DOMAINE [sélecteurs DKIM]` : audit SPF, DMARC, DKIM, MTA-STS et TLS-RPT (exemple : `./scripts/audit-email-problems.sh daxit.be`)
-- `scripts/audit-compromise.sh` : recherche de traces de compromission après une attaque (lecture seule)
-- `scripts/bad-patterns.txt` : signatures d'attaque (`/.env`, `../`, `${jndi:`, `union select`…) qui déclenchent un ban dès la première requête
-
-### Usage générique (plusieurs scripts)
-
-Lister les scripts disponibles :
-
-```bash
-ls -1 ./scripts/*.sh
-```
-
-Aide d'un script :
-
-```bash
-./scripts/<nom-script>.sh --help
-```
-
-Exécution d'un script en arrière-plan :
-
-```bash
-nohup ./scripts/<nom-script>.sh > /tmp/<nom-script>.out 2>&1 &
-```
-
-### Usage actuel
-
-Script principal :
-
-```bash
-./scripts/ban-path-explorer.sh --help
-./scripts/ban-path-explorer.sh --log-dir /var/log/apache2
-```
-
-Tests :
-
-```bash
-./scripts/test-ban-path-explorer.sh
-```
-
-
-### Service permanent (bans conservés après redémarrage)
-
-Les bans actifs sont stockés dans `/var/lib/ban-path-explorer/state`. À chaque cycle avec `--ban`, les règles absentes (après un redémarrage ou un flush) sont réappliquées. Une IP ajoutée à `/etc/ban-path-explorer/safe-ips.txt` est débloquée au cycle suivant.
-
-```bash
+sudo apt update && sudo apt install -y git iptables iproute2
 sudo git clone https://github.com/daxitsolutions/apache2_ban-hackers.git /opt/apache2_ban-hackers
-sudo cp /opt/apache2_ban-hackers/scripts/ban-path-explorer.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now ban-path-explorer
-sudo cp /opt/apache2_ban-hackers/config/logrotate.d/ban-path-explorer /etc/logrotate.d/
+cd /opt/apache2_ban-hackers
 ```
 
-Seuls les événements des `--window` dernières minutes sont pris en compte. Pour analyser après coup tout l'historique d'une attaque passée, utilisez `--history` (sans `--ban`).
+**2. Déclarer vos IPs d'administration** (elles ne seront jamais bannies)
 
+```bash
+sudo install -D -m 600 scripts/safe-ips.example.txt /etc/ban-path-explorer/safe-ips.txt
+sudo nano /etc/ban-path-explorer/safe-ips.txt
+```
+
+Une IP ou une plage par ligne (`203.0.113.10`, `198.51.100.0/24`, `2001:db8::/48`), `#` pour les commentaires. Les adresses du serveur lui-même sont toujours protégées.
+
+**3. Vérifier que le serveur n'est pas déjà compromis**
+
+```bash
+sudo ./scripts/audit-compromise.sh --days 60
+```
+
+**4. Premier essai, sans rien bloquer** (dry-run)
+
+```bash
+sudo ./scripts/ban-path-explorer.sh
+```
+
+Le script affiche les IPs qu'il aurait bannies et pourquoi. Vérifiez qu'aucune n'est légitime (sinon : whitelist, `--ignore-paths`, ou ajustez `scripts/bad-patterns.txt`). Pour remonter tout l'historique des logs (enquête sur une attaque passée) : `sudo ./scripts/ban-path-explorer.sh --history`.
+
+**5. Activer la protection permanente**
+
+```bash
+sudo cp scripts/ban-path-explorer.service /etc/systemd/system/
+sudo cp config/logrotate.d/ban-path-explorer /etc/logrotate.d/
+sudo systemctl daemon-reload && sudo systemctl enable --now ban-path-explorer
+sudo systemctl status ban-path-explorer
+```
+
+**6. Suivre l'activité**
+
+```bash
+sudo tail -f /var/log/ban-path-explorer.log      # bans, déblocages, avertissements
+sudo iptables -S BAN-PATH-EXPLORER               # IPv4 bannies
+sudo ip6tables -S BAN-PATH-EXPLORER              # IPv6 bannies
+sudo cat /var/lib/ban-path-explorer/state        # ip|expiration|nombre de bans|début
+```
+
+Étapes suivantes recommandées : [protection proactive](#protection-proactive--fail2ban-modsecurity-crowdsec) et [durcissement](#durcissement-du-serveur).
+
+---
+
+### ban-path-explorer.sh : fonctionnement
+
+**Ce qui déclenche un ban**
+
+1. **Scan** : au moins `--threshold` (20) chemins différents en erreur pour une même IP dans une fenêtre de `--window` (30) minutes. Sont comptés :
+   - error log : `File does not exist`, `script not found`, `AH01276` ;
+   - access log : réponses 400, 403, 404, 405 (query string ignorée) ;
+   - access log : chaque `POST` sur `wp-login.php` ou `xmlrpc.php` (brute force WordPress).
+2. **Signature d'attaque** : **une seule requête** contenant un motif de `scripts/bad-patterns.txt` (`/.env`, `/.git/`, `../`, `union select`, `${jndi:`, `() {`…), cherché dans l'URL, le referer et le user-agent, quel que soit le code HTTP.
+3. **Blocage ModSecurity** : toute requête refusée par le WAF (`ModSecurity: Access denied`).
+
+**Durée des bans (récidive)** : 1er ban `--ban-duration` (60 min), 2e : 24 h, 3e : 7 jours, puis 30 jours. Un ban expiré est retenu 30 jours pour compter les récidives.
+
+**Garde-fous** : jamais de ban pour une IP de la whitelist, une adresse du serveur, une IP privée (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7… : souvent un reverse proxy) ou une valeur qui n'est pas une IP unique valide.
+
+**Logs analysés par défaut** : dans `--log-dir` (`/var/log/apache2`), les fichiers `*error*.log`, `*access*.log` (Debian) et `*error_log`, `*access_log` (RHEL). Un avertissement s'affiche si un `ErrorLog`/`CustomLog` de la configuration Apache n'est pas couvert.
+
+**Options**
+
+| Option | Défaut | Rôle |
+|---|---|---|
+| `--ban` | désactivé | Applique réellement les bans (sinon dry-run) |
+| `--follow` | | Analyse en boucle (utilisé par le service) |
+| `--follow-interval SEC` | 5 | Intervalle entre deux analyses en `--follow` |
+| `--threshold N` | 20 | Chemins différents en erreur avant ban |
+| `--window MIN` | 30 | Fenêtre de détection (seuls ces événements récents comptent) |
+| `--ban-duration MIN` | 60 | Durée du premier ban |
+| `--history` | | Analyse tout l'historique lu, pas seulement la fenêtre (enquête, sans `--ban`) |
+| `--log-dir DIR` | `/var/log/apache2` | Dossier des logs |
+| `--log-files "F1 F2"` | | Liste explicite de fichiers (relatifs à `--log-dir` ou absolus) |
+| `--ignore-paths "a,b"` | | Ignore les chemins contenant ces motifs (ex. `favicon.ico,robots.txt`) |
+| `--max-log-lines N` | 20000 | Lignes lues à la fin de chaque fichier |
+| `--max-events N` | 200000 | Événements traités au maximum par analyse |
+| `--lock-dir DIR` | `/run/ban-path-explorer.lock` | Verrou d'instance unique |
+| `--quiet` | | Aucune sortie écran |
+
+**Fichiers**
+
+| Fichier | Contenu |
+|---|---|
+| `/etc/ban-path-explorer/safe-ips.txt` | Whitelist (hors du repo, pour ne pas publier vos IPs) |
+| `scripts/bad-patterns.txt` | Signatures à ban immédiat : à adapter à vos sites |
+| `/var/lib/ban-path-explorer/state` | Bans actifs et historique des récidives |
+| `/var/log/ban-path-explorer.log` | Journal des bans, déblocages et avertissements |
+
+**Débloquer une IP** : ajoutez-la à `/etc/ban-path-explorer/safe-ips.txt` ; elle est débloquée au cycle suivant (≤ 5 s avec le service).
+
+**Après un redémarrage** : les bans encore valides sont réappliqués automatiquement depuis le fichier d'état.
 
 ### Derrière un reverse proxy / CDN (important)
 
-Si Apache est derrière nginx, HAProxy, un load balancer ou Cloudflare, les logs contiennent **l'IP du proxy**, pas celle de l'attaquant. Par sécurité, le script refuse de bannir les IPs privées (10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16, fc00::/7, fe80::/10) et le journalise (`Ban refusé: IP privée`). Si ce message apparaît, activez `mod_remoteip` pour que les logs contiennent la vraie IP du client :
+Si Apache est derrière nginx, HAProxy, un load balancer ou Cloudflare, les logs contiennent **l'IP du proxy**. Le script refuse alors de bannir (IP privée) et journalise `Ban refusé: IP privée … (reverse proxy ?)`. Si ce message apparaît, activez `mod_remoteip` pour que les logs contiennent la vraie IP du client :
 
 ```bash
 sudo a2enmod remoteip
@@ -174,16 +140,48 @@ CONF
 sudo a2enconf remoteip
 ```
 
-Dans les `LogFormat`, remplacez `%h` par `%a` pour l'access log ; l'error log utilise déjà l'IP corrigée. Rechargez ensuite Apache avec `sudo systemctl reload apache2`.
+Remplacez ensuite `%h` par `%a` dans les `LogFormat`, puis `sudo systemctl reload apache2`. Avec un **CDN public**, bannir avec iptables n'a aucun effet (le trafic arrive depuis le CDN) : bloquez au niveau du CDN, ou n'acceptez sur 80/443 que les IPs du CDN.
 
-Avec un **CDN public** (Cloudflare…), utilisez `RemoteIPTrustedProxyList` avec la liste des IPs du CDN. Attention : bannir avec iptables n'a alors **aucun effet**, puisque le trafic arrive depuis le CDN. Il faut bloquer au niveau du CDN, ou n'accepter sur 80/443 que les IPs du CDN.
+---
 
+### Lancer les tests
+
+Les tests ne modifient **aucun fichier permanent** du serveur : le script testé est copié dans un dossier temporaire avec ses propres journal, état, whitelist et verrou, puis supprimé à la fin.
+
+**Tests de ban-path-explorer.sh** (sur le serveur)
+
+```bash
+sudo ./scripts/test-ban-path-explorer.sh
+```
+
+- tests 1 à 4 : exécution sur une copie des 15 000 dernières lignes de vos vrais logs (`/var/log/apache2` ou `/var/log/httpd`), sautés s'il n'y en a pas ;
+- test 5 : vérifie que le vrai journal `/var/log/ban-path-explorer.log` n'a pas été modifié ;
+- tests « Access », « Signature », « Whitelist » : logs synthétiques (scans, brute force, signatures, ModSecurity, plages CIDR).
+
+Le code de retour vaut 0 si tout passe, 1 sinon.
+
+**Tests iptables complets** (bans IPv4/IPv6, récidive, restauration après redémarrage, IP privées refusées…) : ils créent et vident de vraies règles, donc **à lancer uniquement dans un conteneur jetable**, jamais sur un serveur en production :
+
+```bash
+docker run --rm --cap-add NET_ADMIN -e BAN_TESTS=1 -v "$PWD":/repo -w /repo debian:stable-slim \
+  bash -c 'apt-get update -qq && apt-get install -y -qq iptables iproute2 procps >/dev/null && ./scripts/test-ban-path-explorer.sh'
+```
+
+**Tests de l'audit email** (aucune requête DNS réelle, un faux `dig` est utilisé ; sans sudo) :
+
+```bash
+./scripts/test-audit-email-problems.sh
+```
+
+**Mode essai du script de ban** : sans `--ban`, `ban-path-explorer.sh` ne bloque rien et affiche seulement ce qu'il ferait. C'est la façon sûre de tester un réglage (`--threshold`, `bad-patterns.txt`…) sur un serveur réel.
+
+---
 
 ### Protection proactive : fail2ban, ModSecurity, CrowdSec
 
-`ban-path-explorer.sh` réagit aux attaques déjà subies. Ces trois outils complètent la protection : ils couvrent SSH, bloquent l'exploit dès la première requête, et bloquent les IPs connues comme malveillantes avant même qu'elles n'arrivent.
+`ban-path-explorer.sh` réagit à ce qui arrive sur vos logs Apache. Ces outils le complètent (SSH, exploit bloqué dès la 1re requête, IPs malveillantes connues bloquées avant d'arriver). Ils cohabitent sans conflit (chaînes iptables séparées) ; reportez vos IPs d'administration dans chacun.
 
-**1. fail2ban** : brute force SSH/HTTP, bots, Shellshock, récidive (configuration testée : `config/fail2ban/jail.d/ban-hackers.local`)
+**fail2ban** : SSH, brute force HTTP, bots, Shellshock, récidive (config testée avec fail2ban 1.1)
 
 ```bash
 sudo apt install fail2ban
@@ -193,7 +191,7 @@ sudo fail2ban-client -t && sudo systemctl restart fail2ban
 sudo fail2ban-client status
 ```
 
-**2. ModSecurity + OWASP CRS** (pare-feu applicatif) : bloque SQLi, XSS, LFI et RCE même depuis une IP inconnue. Chaque requête bloquée (`ModSecurity: Access denied`) déclenche aussi un ban par `ban-path-explorer.sh`.
+**ModSecurity + OWASP CRS** (pare-feu applicatif) : bloque SQLi, XSS, LFI, RCE même depuis une IP inconnue ; chaque blocage déclenche aussi un ban par `ban-path-explorer.sh`.
 
 ```bash
 sudo apt install libapache2-mod-security2 modsecurity-crs
@@ -201,29 +199,28 @@ sudo cp /etc/modsecurity/modsecurity.conf-recommended /etc/modsecurity/modsecuri
 sudo apache2ctl configtest && sudo systemctl reload apache2
 ```
 
-Le moteur démarre en `SecRuleEngine DetectionOnly` : il journalise sans bloquer. Laissez-le ainsi **1 à 2 semaines** et cherchez les faux positifs avec `grep ModSecurity /var/log/apache2/*error.log`. Ensuite, activez le blocage :
+Le moteur démarre en `SecRuleEngine DetectionOnly` (journalise sans bloquer). Après **1 à 2 semaines** sans faux positif (`grep ModSecurity /var/log/apache2/*error.log`), activez le blocage :
 
 ```bash
 sudo sed -i 's/^SecRuleEngine .*/SecRuleEngine On/' /etc/modsecurity/modsecurity.conf
 sudo systemctl reload apache2
 ```
 
-**3. CrowdSec** : blocklist communautaire. Les IPs vues en train d'attaquer d'autres serveurs sont bloquées chez vous **avant leur première requête**. C'est la seule protection contre les scans distribués.
+**CrowdSec** : liste de blocage communautaire, seule protection contre les scans distribués (non testé dans ce projet).
 
 ```bash
-curl -s https://install.crowdsec.net | sudo sh       # dépôt officiel CrowdSec
+curl -s https://install.crowdsec.net | sudo sh
 sudo apt install crowdsec crowdsec-firewall-bouncer-iptables
 sudo cscli collections install crowdsecurity/apache2 crowdsecurity/sshd
 sudo systemctl reload crowdsec
 sudo cscli metrics && sudo cscli decisions list
 ```
 
-Pensez à déclarer vos IPs d'administration dans une whitelist CrowdSec (`/etc/crowdsec/parsers/s02-enrich/`, voir la documentation CrowdSec).
-
+---
 
 ### Durcissement du serveur
 
-**Apache** : masque la version, interdit le listing de répertoires, `.env`, `.git` et les sauvegardes `.sql`/`.bak`, et ajoute des en-têtes de sécurité. Configuration testée : `config/apache/zz-ban-hackers-hardening.conf`.
+**Apache** : version masquée, pas de listing de répertoires, `.env`/`.git`/`.sql`/`.bak` interdits (sauf `/.well-known/` pour Let's Encrypt), en-têtes de sécurité.
 
 ```bash
 sudo cp config/apache/zz-ban-hackers-hardening.conf /etc/apache2/conf-available/
@@ -231,104 +228,188 @@ sudo a2enmod headers && sudo a2enconf zz-ban-hackers-hardening
 sudo apache2ctl configtest && sudo systemctl reload apache2
 ```
 
-**SSH** : connexion par clé uniquement, 3 essais maximum (`config/ssh/99-ban-hackers.conf`). ⚠️ Vérifiez d'abord que vous vous connectez bien par clé, et gardez une session ouverte pendant le test.
+**SSH** : connexion par clé uniquement, 3 essais maximum. ⚠️ Vérifiez d'abord que vous vous connectez **par clé**, et gardez une session ouverte pendant le test.
 
 ```bash
 sudo cp config/ssh/99-ban-hackers.conf /etc/ssh/sshd_config.d/
 sudo sshd -t && sudo systemctl reload ssh
 ```
 
-**Mises à jour de sécurité automatiques** :
+**Mises à jour de sécurité automatiques**
 
 ```bash
 sudo apt install unattended-upgrades && sudo dpkg-reconfigure -plow unattended-upgrades
 ```
 
-**Pare-feu par défaut en refus** : n'ouvrez que 80, 443 et SSH, si possible limité à vos IPs d'administration. Par exemple avec ufw : `sudo ufw default deny incoming && sudo ufw allow 80,443/tcp && sudo ufw allow from <IP_ADMIN> to any port 22 && sudo ufw enable`.
+**Pare-feu par défaut en refus** : n'ouvrez que 80, 443 et SSH (idéalement limité à vos IPs), par exemple avec ufw :
 
-**Après une attaque** : `scripts/audit-compromise.sh` recherche, **en lecture seule**, les traces de compromission. Il vérifie les comptes UID 0, les clés SSH ajoutées, les crontabs et services récents, les webshells PHP, les fichiers PHP dans les dossiers d'upload, les exécutables et processus lancés depuis `/tmp`, les ports, les connexions sortantes, les SUID et l'intégrité des paquets.
+```bash
+sudo ufw default deny incoming && sudo ufw allow 80,443/tcp
+sudo ufw allow from <IP_ADMIN> to any port 22 && sudo ufw enable
+```
+
+---
+
+### Audit après une attaque
 
 ```bash
 sudo ./scripts/audit-compromise.sh --days 30 --www /var/www
 ```
 
+Lecture seule. Liste : comptes UID 0 et comptes avec shell, fichiers `passwd`/`shadow`/`sudoers` modifiés, clés SSH autorisées, crontabs et services systemd récents, `ld.so.preload`, webshells PHP, PHP récents ou dans des dossiers d'upload, exécutables et processus lancés depuis `/tmp`/`/dev/shm`, ports en écoute, connexions sortantes, SUID récents, intégrité des paquets (`debsums`). Toute ligne inattendue dans « UID 0 », « Clés SSH », « Webshells » ou « Processus » doit être traitée comme une compromission : changez tous les secrets et, idéalement, réinstallez le serveur.
+
+### Audit de sécurité email
+
+```bash
+./scripts/audit-email-problems.sh
+```
+
+Le domaine est demandé au lancement, puis d'éventuels sélecteurs DKIM supplémentaires (visibles dans l'en-tête `DKIM-Signature: … s=XXX` d'un mail envoyé). En une ligne : `./scripts/audit-email-problems.sh exemple.com s1 s2`. Nécessite `dig` (`sudo apt install dnsutils`).
+
+---
+
+### Mise à jour
+
+```bash
+cd /opt/apache2_ban-hackers
+sudo git pull
+sudo systemctl restart ban-path-explorer
+```
+
+> ⚠️ **Si vous venez d'une version où la whitelist était `scripts/safe-ips.txt`** : ce fichier n'est plus versionné et `git pull` le supprime. Sauvegardez-le **avant** :
+>
+> ```bash
+> sudo install -D -m 600 scripts/safe-ips.txt /etc/ban-path-explorer/safe-ips.txt
+> sudo git checkout -- scripts/safe-ips.txt && sudo git pull
+> ```
+>
+> Le fichier d'état passe aussi de `/var/log/ban-path-explorer.state` à `/var/lib/ban-path-explorer/state` (migration automatique).
+
+### Dépannage
+
+| Symptôme | Cause / solution |
+|---|---|
+| `Erreur : ce script doit être lancé avec sudo` | Relancez la même commande précédée de `sudo` |
+| `Ban refusé: IP privée` dans le journal | Apache est derrière un proxy : configurez `mod_remoteip` (voir plus haut) |
+| `Avertissement : log Apache non analysé` | Un vhost écrit ailleurs : ajoutez `--log-files` ou `--log-dir` dans le service |
+| Une IP légitime est bannie | Ajoutez-la à `/etc/ban-path-explorer/safe-ips.txt` ; si c'est une signature, retirez le motif de `bad-patterns.txt` |
+| `whitelist créée vide` | Aucune whitelist trouvée : complétez `/etc/ban-path-explorer/safe-ips.txt` |
+| Le service ne démarre pas | `sudo journalctl -u ban-path-explorer -n 50` ; vérifiez le chemin `ExecStart` si le repo n'est pas dans `/opt` |
+
 ---
 
 ## English
 
-Shell script collection for Apache security and observability tasks.
+Shell toolkit to protect an Apache web server (Debian/Ubuntu, RHEL-compatible): automatic attacker detection and banning from logs, ready-to-use hardening configs, and security audits.
 
-### Project structure
+| Tool | Purpose |
+|---|---|
+| `scripts/ban-path-explorer.sh` | Parses Apache error + access logs and **bans** (iptables/ip6tables) IPs that scan, brute-force, or send a known attack request |
+| `scripts/audit-compromise.sh` | Post-attack compromise indicators (accounts, SSH keys, webshells, suspicious processes…), **read-only** |
+| `scripts/audit-email-problems.sh` | Domain anti-spoofing check: SPF, DMARC, DKIM, MTA-STS, TLS-RPT |
+| `config/` | Tested configs: fail2ban, Apache and SSH hardening, logrotate |
 
-All scripts are grouped under `scripts/` so new tools can be added consistently.
+`ban-path-explorer.sh`, `audit-compromise.sh` and the test suite **must run with `sudo`** and refuse to start otherwise. `audit-email-problems.sh` only does DNS lookups and runs without sudo.
 
-- `scripts/ban-path-explorer.sh`: detects path-scanning behavior in Apache logs
-- `scripts/test-ban-path-explorer.sh`: test runner for the main script
-- `scripts/safe-ips.example.txt`: whitelist template. The real whitelist lives in `/etc/ban-path-explorer/safe-ips.txt`, **outside the repo**, so your IPs are not published. Supports IPs, CIDR ranges and `#` comments
-- `scripts/audit-email-problems.sh DOMAIN [DKIM selectors]`: SPF, DMARC, DKIM, MTA-STS and TLS-RPT audit
-- `scripts/audit-compromise.sh`: post-attack compromise indicators (read-only)
-- `scripts/bad-patterns.txt`: attack signatures (`/.env`, `../`, `${jndi:`, `union select`…) that trigger a ban on the very first request
-
-### Generic usage (multiple scripts)
-
-List available scripts:
+### Quick start
 
 ```bash
-ls -1 ./scripts/*.sh
-```
-
-Show help for any script:
-
-```bash
-./scripts/<script-name>.sh --help
-```
-
-Run any script in background:
-
-```bash
-nohup ./scripts/<script-name>.sh > /tmp/<script-name>.out 2>&1 &
-```
-
-### Current usage
-
-Main script:
-
-```bash
-./scripts/ban-path-explorer.sh --help
-./scripts/ban-path-explorer.sh --log-dir /var/log/apache2
-```
-
-Tests:
-
-```bash
-./scripts/test-ban-path-explorer.sh
-```
-
-### Permanent service (bans survive reboots)
-
-Active bans are stored in `/var/lib/ban-path-explorer/state`. On every `--ban` cycle, missing rules (after a reboot or flush) are re-applied. An IP added to `/etc/ban-path-explorer/safe-ips.txt` is unbanned on the next cycle.
-
-```bash
+# 1. Install
+sudo apt update && sudo apt install -y git iptables iproute2
 sudo git clone https://github.com/daxitsolutions/apache2_ban-hackers.git /opt/apache2_ban-hackers
-sudo cp /opt/apache2_ban-hackers/scripts/ban-path-explorer.service /etc/systemd/system/
+cd /opt/apache2_ban-hackers
+
+# 2. Whitelist your admin IPs (IPs, CIDR ranges, # comments)
+sudo install -D -m 600 scripts/safe-ips.example.txt /etc/ban-path-explorer/safe-ips.txt
+sudo nano /etc/ban-path-explorer/safe-ips.txt
+
+# 3. Check the server is not already compromised
+sudo ./scripts/audit-compromise.sh --days 60
+
+# 4. Dry run: shows what would be banned, blocks nothing
+sudo ./scripts/ban-path-explorer.sh
+
+# 5. Permanent protection
+sudo cp scripts/ban-path-explorer.service /etc/systemd/system/
+sudo cp config/logrotate.d/ban-path-explorer /etc/logrotate.d/
 sudo systemctl daemon-reload && sudo systemctl enable --now ban-path-explorer
-sudo cp /opt/apache2_ban-hackers/config/logrotate.d/ban-path-explorer /etc/logrotate.d/
+
+# 6. Monitor
+sudo tail -f /var/log/ban-path-explorer.log
+sudo iptables -S BAN-PATH-EXPLORER; sudo ip6tables -S BAN-PATH-EXPLORER
 ```
 
-Only events from the last `--window` minutes are considered. To investigate a past attack across the whole log history, use `--history` (without `--ban`).
+### How ban-path-explorer works
 
-### Behind a reverse proxy / CDN (important)
+- **Ban triggers**:
+  - scan: ≥ `--threshold` (20) distinct failing paths in `--window` (30) minutes, counting error-log "file not found" lines, access-log 400/403/404/405 responses, and POSTs to `wp-login.php`/`xmlrpc.php`;
+  - **one** request matching `scripts/bad-patterns.txt`, searched in the URL, referer and user-agent;
+  - any request blocked by ModSecurity.
+- **Ban durations**: `--ban-duration` (60 min), then 24 h, 7 days, then 30 days for repeat offenders (remembered for 30 days).
+- **Never banned**: whitelisted IPs/ranges, the server's own addresses, private IPs (likely a reverse proxy), invalid values.
+- **Bans survive reboots**: they are re-applied from `/var/lib/ban-path-explorer/state`.
+- **Unban an IP**: add it to `/etc/ban-path-explorer/safe-ips.txt`.
+- **Default logs**: `*error*.log`, `*access*.log`, `*error_log`, `*access_log` in `--log-dir`. A warning is shown for Apache logs that are configured but not covered.
+- **Main options**:
+  - `--ban` (without it: dry run);
+  - `--follow`, `--threshold`, `--window`, `--ban-duration`;
+  - `--history` (whole log history, for investigations);
+  - `--log-dir`, `--log-files`, `--ignore-paths`, `--quiet`.
 
-Behind nginx, HAProxy, a load balancer or Cloudflare, logs show the **proxy IP**, not the attacker's. As a safety net the script refuses to ban private IPs (10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16, fc00::/7, fe80::/10) and logs `Ban refusé: IP privée`. If you see it, enable `mod_remoteip` (`RemoteIPHeader X-Forwarded-For` + `RemoteIPTrustedProxy <your proxies>`) and use `%a` instead of `%h` in `LogFormat`. With a public CDN, iptables bans are useless (traffic comes from the CDN): block at the CDN level.
+  See `sudo ./scripts/ban-path-explorer.sh --help`.
+- **Behind a reverse proxy/CDN**: enable `mod_remoteip` (`RemoteIPHeader X-Forwarded-For` + `RemoteIPTrustedProxy <your proxies>`) and use `%a` instead of `%h` in `LogFormat`. With a public CDN, iptables bans have no effect: block at the CDN level.
 
-### Proactive protection: fail2ban, ModSecurity, CrowdSec
+### Running the tests
 
-- **fail2ban** (tested config): `sudo apt install fail2ban && sudo cp config/fail2ban/jail.d/ban-hackers.local /etc/fail2ban/jail.d/ && sudo systemctl restart fail2ban`. Set `ignoreip` first.
-- **ModSecurity + OWASP CRS**: `sudo apt install libapache2-mod-security2 modsecurity-crs`, copy `modsecurity.conf-recommended` to `modsecurity.conf`, run in `DetectionOnly` for 1–2 weeks, then `SecRuleEngine On`. Every block (`ModSecurity: Access denied`) also triggers a `ban-path-explorer.sh` ban.
-- **CrowdSec** (community blocklist, blocks known-bad IPs before their first request): `curl -s https://install.crowdsec.net | sudo sh && sudo apt install crowdsec crowdsec-firewall-bouncer-iptables && sudo cscli collections install crowdsecurity/apache2 crowdsecurity/sshd`.
+The tests never modify permanent files: the script under test runs from a temporary copy with its own log, state, whitelist and lock.
 
-### Server hardening
+```bash
+sudo ./scripts/test-ban-path-explorer.sh        # on the server: real logs (copied) + synthetic logs
+./scripts/test-audit-email-problems.sh          # fake dig, no real DNS queries
+```
 
-- **Apache** (tested): `config/apache/zz-ban-hackers-hardening.conf`. Hides the version, disables directory listing and denies `.env`, `.git`, `.sql`, `.bak`… Enable with `a2enmod headers && a2enconf zz-ban-hackers-hardening`.
-- **SSH** (tested with `sshd -t`): `config/ssh/99-ban-hackers.conf`, key-only login. Check that key login works first.
-- **After an attack**: `sudo ./scripts/audit-compromise.sh` looks for compromise indicators (UID 0 accounts, SSH keys, cron/systemd persistence, PHP webshells, binaries in /tmp, suspicious processes and connections). It is read-only.
+Full iptables tests (IPv4/IPv6 bans, repeat offenders, restore after reboot…) create real firewall rules. Run them **only in a disposable container**:
+
+```bash
+docker run --rm --cap-add NET_ADMIN -e BAN_TESTS=1 -v "$PWD":/repo -w /repo debian:stable-slim \
+  bash -c 'apt-get update -qq && apt-get install -y -qq iptables iproute2 procps >/dev/null && ./scripts/test-ban-path-explorer.sh'
+```
+
+Running `ban-path-explorer.sh` without `--ban` is the safe way to try settings on a live server.
+
+### Proactive protection and hardening
+
+- **fail2ban** (tested): `sudo apt install fail2ban && sudo cp config/fail2ban/jail.d/ban-hackers.local /etc/fail2ban/jail.d/`. Set `ignoreip`, then `sudo fail2ban-client -t && sudo systemctl restart fail2ban`.
+- **ModSecurity + OWASP CRS**:
+  1. `sudo apt install libapache2-mod-security2 modsecurity-crs`;
+  2. copy `modsecurity.conf-recommended` to `modsecurity.conf`;
+  3. run in `DetectionOnly` for 1–2 weeks;
+  4. switch to `SecRuleEngine On`.
+- **CrowdSec** (community blocklist, not tested here):
+  ```bash
+  curl -s https://install.crowdsec.net | sudo sh
+  sudo apt install crowdsec crowdsec-firewall-bouncer-iptables
+  sudo cscli collections install crowdsecurity/apache2 crowdsecurity/sshd
+  ```
+- **Apache**: `config/apache/zz-ban-hackers-hardening.conf`, enabled with `a2enmod headers && a2enconf zz-ban-hackers-hardening`.
+- **SSH**: `config/ssh/99-ban-hackers.conf` (key-only login). Check that key login works first, then run `sshd -t`.
+- **Automatic security updates**: `unattended-upgrades`. **Firewall**: default deny incoming.
+
+### Audits
+
+```bash
+sudo ./scripts/audit-compromise.sh --days 30 --www /var/www   # read-only
+./scripts/audit-email-problems.sh                             # asks for the domain
+```
+
+### Updating
+
+```bash
+cd /opt/apache2_ban-hackers && sudo git pull && sudo systemctl restart ban-path-explorer
+```
+
+If you come from a version where the whitelist was `scripts/safe-ips.txt`, back it up first, because `git pull` deletes it:
+
+```bash
+sudo install -D -m 600 scripts/safe-ips.txt /etc/ban-path-explorer/safe-ips.txt
+```

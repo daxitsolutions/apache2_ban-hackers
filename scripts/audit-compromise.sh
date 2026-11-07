@@ -19,7 +19,11 @@ while [ $# -gt 0 ]; do
   shift
 done
 case "$DAYS" in ''|*[!0-9]*) echo "--days doit être un entier" >&2; exit 1 ;; esac
-[ "$(id -u)" = "0" ] || echo "⚠️  Lancé sans root : une partie des fichiers ne sera pas lisible."
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Erreur : ce script doit être lancé avec sudo (lecture de /etc/shadow, /root, /proc des autres utilisateurs)." >&2
+  echo "  sudo $0 $*" >&2
+  exit 1
+fi
 
 section() { printf '\n=== %s ===\n' "$1"; }
 # Affiche la sortie, ou "(rien)" si vide
