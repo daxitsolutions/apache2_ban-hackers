@@ -3,7 +3,7 @@
 # Usage : ban-path-explorer.sh [options]
 # Exemples :
 #   ./ban-path-explorer.sh
-#   nohup ./ban-path-explorer.sh --log-dir /var/log/apache2 > /tmp/ban-path-explorer.out 2>&1 &
+#   nohup ./ban-path-explorer.sh --log-dir /var/log/apache2 > /var/log/ban-path-explorer.out 2>&1 &
 #   ./ban-path-explorer.sh --log-dir /var/log/apache2 --threshold 25 --window 20
 #   ./ban-path-explorer.sh --log-files "error.log error_site.log" --ignore-paths "favicon.ico,robots.txt"
 #   ./ban-path-explorer.sh --ban --ban-duration 60
@@ -23,7 +23,7 @@ BAD_PATTERNS_FILE="$SCRIPT_DIR/bad-patterns.txt"
 TRACK_LOG="/var/log/ban-path-explorer.log"
 BAN_STATE_FILE="/var/lib/ban-path-explorer/state"
 LEGACY_BAN_STATE_FILE="/var/log/ban-path-explorer.state"
-LOCK_DIR_BASE="/tmp/ban-path-explorer.lock"
+LOCK_DIR_BASE="/run/ban-path-explorer.lock"   # /run : écriture root uniquement (pas /tmp)
 
 DEFAULT_LOG_DIR="/var/log/apache2"
 DEFAULT_THRESHOLD="20"
@@ -65,13 +65,14 @@ declare -A BEST_TOTAL_EVENTS=()
 declare -A TS_CACHE=()
 declare -A SIG_HIT=()
 RUNNING_PID=""
+WORK_DIR=""
 
 print_usage() {
   cat <<EOF
 Usage: $SCRIPT_NAME [options]
 
 Exécution en arrière-plan:
-  nohup ./$SCRIPT_NAME --log-dir $DEFAULT_LOG_DIR > /tmp/ban-path-explorer.out 2>&1 &
+  nohup ./$SCRIPT_NAME --log-dir $DEFAULT_LOG_DIR > /var/log/ban-path-explorer.out 2>&1 &
 
 Options:
   --log-dir DIR            Dossier des logs Apache (défaut: $DEFAULT_LOG_DIR)
@@ -502,8 +503,7 @@ release_lock() {
 cleanup_expired_bans() {
   local now_ts tmp_file ip exp
   now_ts="$(date '+%s')"
-  tmp_file="/tmp/${SCRIPT_NAME}.state.$$"
-  : > "$tmp_file"
+  tmp_file="$(mktemp "$BAN_STATE_FILE.XXXXXX")" || return 1
   while IFS='|' read -r ip exp || [ -n "${ip}${exp}" ]; do
     [ -z "${ip:-}" ] && continue
     [ -z "${exp:-}" ] && continue
@@ -530,8 +530,7 @@ cleanup_expired_bans() {
       printf '%s|%s\n' "$ip" "$exp" >> "$tmp_file"
     fi
   done < "$BAN_STATE_FILE"
-  cat "$tmp_file" > "$BAN_STATE_FILE"
-  rm -f "$tmp_file"
+  mv -f "$tmp_file" "$BAN_STATE_FILE"   # remplacement atomique
 }
 
 ensure_ban_chain() {
@@ -558,8 +557,7 @@ update_ban_state() {
   local target_ip="$1"
   local expiry="$2"
   local tmp_file ip exp
-  tmp_file="/tmp/${SCRIPT_NAME}.stateup.$$"
-  : > "$tmp_file"
+  tmp_file="$(mktemp "$BAN_STATE_FILE.XXXXXX")" || return 1
   while IFS='|' read -r ip exp || [ -n "${ip}${exp}" ]; do
     [ -z "${ip:-}" ] && continue
     [ "$ip" = "$target_ip" ] && continue
@@ -568,8 +566,7 @@ update_ban_state() {
     fi
   done < "$BAN_STATE_FILE"
   printf '%s|%s\n' "$target_ip" "$expiry" >> "$tmp_file"
-  cat "$tmp_file" > "$BAN_STATE_FILE"
-  rm -f "$tmp_file"
+  mv -f "$tmp_file" "$BAN_STATE_FILE"   # remplacement atomique
 }
 
 ban_ip() {
@@ -794,7 +791,10 @@ main() {
     fi
     return 1
   fi
-  trap 'release_lock' return INT TERM
+  # Fichiers de travail dans un dossier privé (mktemp : nom imprévisible, mode 700)
+  WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ban-path-explorer.XXXXXX")" || { release_lock; return 1; }
+  trap 'release_lock; rm -rf "$WORK_DIR"' EXIT
+  trap 'exit 1' INT TERM
 
   load_safe_ips
   load_local_ips
@@ -820,10 +820,10 @@ main() {
     log_track "Fichier analysé: $ip"
   done
 
-  tmp_parsed="/tmp/${SCRIPT_NAME}.parsed.$$"
-  tmp_events="/tmp/${SCRIPT_NAME}.events.$$"
-  tmp_sorted="/tmp/${SCRIPT_NAME}.sorted.$$"
-  tmp_suspects="/tmp/${SCRIPT_NAME}.suspects.$$"
+  tmp_parsed="$WORK_DIR/parsed"
+  tmp_events="$WORK_DIR/events"
+  tmp_sorted="$WORK_DIR/sorted"
+  tmp_suspects="$WORK_DIR/suspects"
 
   : > "$tmp_parsed"
   : > "$tmp_events"
@@ -951,7 +951,6 @@ main() {
     if ! ensure_ban_chain; then
       log_track "Erreur iptables: impossible d'initialiser la chaîne BAN-PATH-EXPLORER"
       say "Erreur: impossible d'initialiser la chaîne IPTables BAN-PATH-EXPLORER"
-      rm -f "$tmp_parsed" "$tmp_events" "$tmp_sorted" "$tmp_suspects"
       return 1
     fi
     cleanup_expired_bans
@@ -1015,7 +1014,6 @@ main() {
 
   log_track "Fin d'exécution | fichiers=$analyzed_count | lignes_utiles=$total_records | suspects=$suspect_count | seuil_atteint=$threshold_reached"
 
-  rm -f "$tmp_parsed" "$tmp_events" "$tmp_sorted" "$tmp_suspects"
 }
 
 early_help_return "$@"
