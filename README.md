@@ -106,6 +106,7 @@ Tous les scripts sont centralisés dans `scripts/` pour faciliter l'ajout de nou
 - `scripts/ban-path-explorer.sh` : détection de scans de chemins dans les logs Apache
 - `scripts/test-ban-path-explorer.sh` : tests du script principal
 - `scripts/safe-ips.example.txt` : modèle de whitelist. La vraie whitelist est dans `/etc/ban-path-explorer/safe-ips.txt`, **hors du repo** pour ne pas publier vos IPs. Elle accepte les IPs, les plages CIDR (`198.51.100.0/24`, `2001:db8::/48`) et les commentaires `#`
+- `scripts/audit-compromise.sh` : recherche de traces de compromission après une attaque (lecture seule)
 - `scripts/bad-patterns.txt` : signatures d'attaque (`/.env`, `../`, `${jndi:`, `union select`…) qui déclenchent un ban dès la première requête
 
 ### Usage générique (plusieurs scripts)
@@ -218,6 +219,38 @@ sudo cscli metrics && sudo cscli decisions list
 
 Pensez à déclarer vos IPs d'administration dans une whitelist CrowdSec (`/etc/crowdsec/parsers/s02-enrich/`, voir la documentation CrowdSec).
 
+
+### Durcissement du serveur
+
+**Apache** : masque la version, interdit le listing de répertoires, `.env`, `.git` et les sauvegardes `.sql`/`.bak`, et ajoute des en-têtes de sécurité. Configuration testée : `config/apache/zz-ban-hackers-hardening.conf`.
+
+```bash
+sudo cp config/apache/zz-ban-hackers-hardening.conf /etc/apache2/conf-available/
+sudo a2enmod headers && sudo a2enconf zz-ban-hackers-hardening
+sudo apache2ctl configtest && sudo systemctl reload apache2
+```
+
+**SSH** : connexion par clé uniquement, 3 essais maximum (`config/ssh/99-ban-hackers.conf`). ⚠️ Vérifiez d'abord que vous vous connectez bien par clé, et gardez une session ouverte pendant le test.
+
+```bash
+sudo cp config/ssh/99-ban-hackers.conf /etc/ssh/sshd_config.d/
+sudo sshd -t && sudo systemctl reload ssh
+```
+
+**Mises à jour de sécurité automatiques** :
+
+```bash
+sudo apt install unattended-upgrades && sudo dpkg-reconfigure -plow unattended-upgrades
+```
+
+**Pare-feu par défaut en refus** : n'ouvrez que 80, 443 et SSH, si possible limité à vos IPs d'administration. Par exemple avec ufw : `sudo ufw default deny incoming && sudo ufw allow 80,443/tcp && sudo ufw allow from <IP_ADMIN> to any port 22 && sudo ufw enable`.
+
+**Après une attaque** : `scripts/audit-compromise.sh` recherche, **en lecture seule**, les traces de compromission. Il vérifie les comptes UID 0, les clés SSH ajoutées, les crontabs et services récents, les webshells PHP, les fichiers PHP dans les dossiers d'upload, les exécutables et processus lancés depuis `/tmp`, les ports, les connexions sortantes, les SUID et l'intégrité des paquets.
+
+```bash
+sudo ./scripts/audit-compromise.sh --days 30 --www /var/www
+```
+
 ---
 
 ## English
@@ -231,6 +264,7 @@ All scripts are grouped under `scripts/` so new tools can be added consistently.
 - `scripts/ban-path-explorer.sh`: detects path-scanning behavior in Apache logs
 - `scripts/test-ban-path-explorer.sh`: test runner for the main script
 - `scripts/safe-ips.example.txt`: whitelist template. The real whitelist lives in `/etc/ban-path-explorer/safe-ips.txt`, **outside the repo**, so your IPs are not published. Supports IPs, CIDR ranges and `#` comments
+- `scripts/audit-compromise.sh`: post-attack compromise indicators (read-only)
 - `scripts/bad-patterns.txt`: attack signatures (`/.env`, `../`, `${jndi:`, `union select`…) that trigger a ban on the very first request
 
 ### Generic usage (multiple scripts)
@@ -290,3 +324,9 @@ Behind nginx, HAProxy, a load balancer or Cloudflare, logs show the **proxy IP**
 - **fail2ban** (tested config): `sudo apt install fail2ban && sudo cp config/fail2ban/jail.d/ban-hackers.local /etc/fail2ban/jail.d/ && sudo systemctl restart fail2ban`. Set `ignoreip` first.
 - **ModSecurity + OWASP CRS**: `sudo apt install libapache2-mod-security2 modsecurity-crs`, copy `modsecurity.conf-recommended` to `modsecurity.conf`, run in `DetectionOnly` for 1–2 weeks, then `SecRuleEngine On`. Every block (`ModSecurity: Access denied`) also triggers a `ban-path-explorer.sh` ban.
 - **CrowdSec** (community blocklist, blocks known-bad IPs before their first request): `curl -s https://install.crowdsec.net | sudo sh && sudo apt install crowdsec crowdsec-firewall-bouncer-iptables && sudo cscli collections install crowdsecurity/apache2 crowdsecurity/sshd`.
+
+### Server hardening
+
+- **Apache** (tested): `config/apache/zz-ban-hackers-hardening.conf`. Hides the version, disables directory listing and denies `.env`, `.git`, `.sql`, `.bak`… Enable with `a2enmod headers && a2enconf zz-ban-hackers-hardening`.
+- **SSH** (tested with `sshd -t`): `config/ssh/99-ban-hackers.conf`, key-only login. Check that key login works first.
+- **After an attack**: `sudo ./scripts/audit-compromise.sh` looks for compromise indicators (UID 0 accounts, SSH keys, cron/systemd persistence, PHP webshells, binaries in /tmp, suspicious processes and connections). It is read-only.
