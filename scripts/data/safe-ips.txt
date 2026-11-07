@@ -1,0 +1,10 @@
+# Whitelist de ban-path-explorer : IPs et plages JAMAIS bannies.
+# Une entrée par ligne : IP (203.0.113.10), plage CIDR (198.51.100.0/24, 2001:db8::/48), # = commentaire.
+#
+# ⚠️ AVANT LE PREMIER LANCEMENT : ajoutez l'IP publique de l'administrateur
+#    (celle depuis laquelle vous vous connectez en SSH : `echo $SSH_CLIENT | cut -d' ' -f1`).
+#    Sinon, une erreur de votre part (scan, URL suspecte) peut vous bannir de votre propre serveur.
+# ⚠️ Ne poussez pas ce fichier complété sur un dépôt public : il révèle vos IPs d'administration.
+#
+# Les adresses du serveur lui-même (toutes ses interfaces) sont protégées automatiquement.
+127.0.0.1

@@ -9,8 +9,8 @@
 #   sudo ./ban-path-explorer.sh --ban                        # bannit
 #   sudo ./ban-path-explorer.sh --follow --ban --quiet       # surveillance continue (cf. service systemd)
 #
-# Whitelist : /etc/ban-path-explorer/safe-ips.txt (IPs, plages CIDR, # commentaires).
-# Modèle : scripts/safe-ips.example.txt
+# Whitelist : scripts/data/safe-ips.txt (IPs, plages CIDR, # commentaires).
+# ⚠️ Ajoutez l'IP de l'administrateur AVANT le premier lancement avec --ban.
 
 set -u
 
@@ -18,8 +18,9 @@ VERSION="2.0"
 REQUIRE_ROOT="1"   # mis à 0 uniquement par le script de test (copie isolée)
 SCRIPT_NAME="$(basename "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SAFE_IPS_FILE="/etc/ban-path-explorer/safe-ips.txt"   # hors du repo : vos IPs ne sont pas publiées
-REPO_SAFE_IPS_FILE="$SCRIPT_DIR/safe-ips.txt"          # ancien emplacement, migré automatiquement
+SAFE_IPS_FILE="$SCRIPT_DIR/data/safe-ips.txt"
+# Anciens emplacements de la whitelist : encore lus s'ils existent, pour ne perdre aucune IP après mise à jour
+LEGACY_SAFE_IPS_FILES="/etc/ban-path-explorer/safe-ips.txt $SCRIPT_DIR/safe-ips.txt"
 BAD_PATTERNS_FILE="$SCRIPT_DIR/bad-patterns.txt"
 TRACK_LOG="/var/log/ban-path-explorer.log"
 BAN_STATE_FILE="/var/lib/ban-path-explorer/state"
@@ -167,7 +168,7 @@ is_private_ip() {
   esac
 }
 
-# Toutes les adresses locales du serveur (v4 + v6) : jamais bannies, même absentes de safe-ips.txt.
+# Toutes les adresses locales du serveur (v4 + v6) : jamais bannies, même absentes de data/safe-ips.txt.
 load_local_ips() {
   local addr
   while read -r addr; do
@@ -230,15 +231,10 @@ setup_tracking_files() {
 
 ensure_safe_ips_file() {
   [ -f "$SAFE_IPS_FILE" ] && return 0
-  mkdir -p -m 700 "$(dirname "$SAFE_IPS_FILE")" 2>/dev/null || return 1
-  if [ -f "$REPO_SAFE_IPS_FILE" ]; then
-    install -m 600 "$REPO_SAFE_IPS_FILE" "$SAFE_IPS_FILE" || return 1
-    log_track "Whitelist migrée: $REPO_SAFE_IPS_FILE -> $SAFE_IPS_FILE (vous pouvez supprimer l'ancien fichier)"
-  else
-    printf '127.0.0.1\n::1\n' > "$SAFE_IPS_FILE" && chmod 600 "$SAFE_IPS_FILE" || return 1
-    log_track "Avertissement: whitelist absente, $SAFE_IPS_FILE créé vide (ajoutez vos IPs d'administration)"
-    printf 'Avertissement: whitelist créée vide dans %s, ajoutez vos IPs d administration\n' "$SAFE_IPS_FILE" >&2
-  fi
+  mkdir -p "$(dirname "$SAFE_IPS_FILE")" 2>/dev/null || return 1
+  printf '127.0.0.1\n' > "$SAFE_IPS_FILE" || return 1
+  log_track "Avertissement: whitelist absente, $SAFE_IPS_FILE recréé avec 127.0.0.1 (ajoutez l'IP de l'administrateur)"
+  printf 'Avertissement : whitelist recréée dans %s, ajoutez l IP de l administrateur\n' "$SAFE_IPS_FILE" >&2
   return 0
 }
 
@@ -297,7 +293,15 @@ is_safe_ip() {
 }
 
 load_safe_ips() {
-  local ip_line cleaned
+  local ip_line cleaned f admin_entries=0
+  local -a files=("$SAFE_IPS_FILE")
+  for f in $LEGACY_SAFE_IPS_FILES; do
+    if [ -f "$f" ]; then
+      files+=("$f")
+      log_routine "Avertissement: ancienne whitelist encore lue: $f (déplacez ses IPs dans $SAFE_IPS_FILE puis supprimez-la)"
+    fi
+  done
+  for f in "${files[@]}"; do
   while IFS= read -r ip_line || [ -n "$ip_line" ]; do
     cleaned="$(trim_spaces "${ip_line%%#*}")"
     [ -z "$cleaned" ] && continue
@@ -311,7 +315,16 @@ load_safe_ips() {
         ;;
       *) SAFE_IPS["$cleaned"]=1 ;;
     esac
-  done < "$SAFE_IPS_FILE"
+    case "$cleaned" in
+      127.*|::1) ;;
+      *) admin_entries=$((admin_entries + 1)) ;;
+    esac
+  done < "$f"
+  done
+  if [ "$admin_entries" -eq 0 ] && [ "${BAN_PATH_FOLLOW_CHILD:-0}" != "1" ]; then
+    log_track "Avertissement: aucune IP d'administration dans $SAFE_IPS_FILE"
+    say "⚠️  Aucune IP d'administration dans $SAFE_IPS_FILE : ajoutez la vôtre pour ne pas risquer de vous bannir."
+  fi
 }
 
 parse_ignore_paths() {

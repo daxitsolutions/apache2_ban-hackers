@@ -1,9 +1,0 @@
-# Whitelist : IPs et plages jamais bannies (une par ligne, # = commentaire).
-# Emplacement réel : /etc/ban-path-explorer/safe-ips.txt (hors du repo, root:root 600).
-#   sudo install -D -m 600 scripts/safe-ips.example.txt /etc/ban-path-explorer/safe-ips.txt
-# Les adresses du serveur lui-même sont ajoutées automatiquement.
-127.0.0.1
-::1
-# 203.0.113.10        # IP fixe d'administration
-# 198.51.100.0/24     # réseau du bureau
-# 2001:db8:abcd::/48  # préfixe IPv6 du fournisseur

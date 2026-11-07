@@ -32,14 +32,16 @@ sudo git clone https://github.com/daxitsolutions/apache2_ban-hackers.git /opt/ap
 cd /opt/apache2_ban-hackers
 ```
 
-**2. Déclarer vos IPs d'administration** (elles ne seront jamais bannies)
+**2. Ajouter l'IP de l'administrateur dans la whitelist : obligatoire avant tout lancement**
+
+> ⚠️ **Avant le premier lancement**, ajoutez votre IP publique d'administration dans `scripts/data/safe-ips.txt`. Le fichier ne contient au départ que `127.0.0.1`. Sans votre IP, une erreur de votre part (une URL mal tapée, un test de scan, un accès à `/.env`) peut **vous bannir de votre propre serveur**, SSH compris. Le script affiche un avertissement tant qu'aucune IP d'administration n'est déclarée.
 
 ```bash
-sudo install -D -m 600 scripts/safe-ips.example.txt /etc/ban-path-explorer/safe-ips.txt
-sudo nano /etc/ban-path-explorer/safe-ips.txt
+echo $SSH_CLIENT | cut -d' ' -f1                 # votre IP actuelle, si vous êtes connecté en SSH
+sudo nano scripts/data/safe-ips.txt
 ```
 
-Une IP ou une plage par ligne (`203.0.113.10`, `198.51.100.0/24`, `2001:db8::/48`), `#` pour les commentaires. Les adresses du serveur lui-même sont toujours protégées.
+Une IP ou une plage par ligne (`203.0.113.10`, `198.51.100.0/24`, `2001:db8::/48`), `#` pour les commentaires. Les adresses du serveur lui-même sont toujours protégées. Ne poussez pas ce fichier complété sur un dépôt public : il révèle vos IPs d'administration.
 
 **3. Vérifier que le serveur n'est pas déjà compromis**
 
@@ -117,12 +119,12 @@ sudo cat /var/lib/ban-path-explorer/state        # ip|expiration|nombre de bans|
 
 | Fichier | Contenu |
 |---|---|
-| `/etc/ban-path-explorer/safe-ips.txt` | Whitelist (hors du repo, pour ne pas publier vos IPs) |
+| `scripts/data/safe-ips.txt` | Whitelist : `127.0.0.1` par défaut, **ajoutez l'IP de l'administrateur avant le lancement** |
 | `scripts/bad-patterns.txt` | Signatures à ban immédiat : à adapter à vos sites |
 | `/var/lib/ban-path-explorer/state` | Bans actifs et historique des récidives |
 | `/var/log/ban-path-explorer.log` | Journal des bans, déblocages et avertissements |
 
-**Débloquer une IP** : ajoutez-la à `/etc/ban-path-explorer/safe-ips.txt` ; elle est débloquée au cycle suivant (≤ 5 s avec le service).
+**Débloquer une IP** : ajoutez-la à `scripts/data/safe-ips.txt` ; elle est débloquée au cycle suivant (≤ 5 s avec le service).
 
 **Après un redémarrage** : les bans encore valides sont réappliqués automatiquement depuis le fichier d'état.
 
@@ -272,16 +274,11 @@ Le domaine est demandé au lancement, puis d'éventuels sélecteurs DKIM supplé
 
 ```bash
 cd /opt/apache2_ban-hackers
-sudo git pull
+sudo git pull --autostash          # --autostash conserve vos IPs ajoutées dans scripts/data/safe-ips.txt
 sudo systemctl restart ban-path-explorer
 ```
 
-> ⚠️ **Si vous venez d'une version où la whitelist était `scripts/safe-ips.txt`** : ce fichier n'est plus versionné et `git pull` le supprime. Sauvegardez-le **avant** :
->
-> ```bash
-> sudo install -D -m 600 scripts/safe-ips.txt /etc/ban-path-explorer/safe-ips.txt
-> sudo git checkout -- scripts/safe-ips.txt && sudo git pull
-> ```
+> ⚠️ **Si vous venez d'une version précédente** : la whitelist était dans `scripts/safe-ips.txt` ou dans `/etc/ban-path-explorer/safe-ips.txt`. Ces anciens fichiers sont **encore lus** s'ils existent, donc aucune IP n'est perdue, et un avertissement le signale. Recopiez leurs IPs dans `scripts/data/safe-ips.txt`, puis supprimez-les.
 >
 > Le fichier d'état passe aussi de `/var/log/ban-path-explorer.state` à `/var/lib/ban-path-explorer/state` (migration automatique).
 
@@ -292,8 +289,10 @@ sudo systemctl restart ban-path-explorer
 | `Erreur : ce script doit être lancé avec sudo` | Relancez la même commande précédée de `sudo` |
 | `Ban refusé: IP privée` dans le journal | Apache est derrière un proxy : configurez `mod_remoteip` (voir plus haut) |
 | `Avertissement : log Apache non analysé` | Un vhost écrit ailleurs : ajoutez `--log-files` ou `--log-dir` dans le service |
-| Une IP légitime est bannie | Ajoutez-la à `/etc/ban-path-explorer/safe-ips.txt` ; si c'est une signature, retirez le motif de `bad-patterns.txt` |
-| `whitelist créée vide` | Aucune whitelist trouvée : complétez `/etc/ban-path-explorer/safe-ips.txt` |
+| Une IP légitime est bannie | Ajoutez-la à `scripts/data/safe-ips.txt` ; si c'est une signature, retirez le motif de `bad-patterns.txt` |
+| `Aucune IP d'administration dans …safe-ips.txt` | Ajoutez votre IP d'administration dans `scripts/data/safe-ips.txt` |
+| `whitelist recréée` | `scripts/data/safe-ips.txt` était absent : il a été recréé avec `127.0.0.1`, ajoutez votre IP |
+| `ancienne whitelist encore lue` | Recopiez ses IPs dans `scripts/data/safe-ips.txt`, puis supprimez l'ancien fichier |
 | Le service ne démarre pas | `sudo journalctl -u ban-path-explorer -n 50` ; vérifiez le chemin `ExecStart` si le repo n'est pas dans `/opt` |
 
 ---
@@ -309,6 +308,8 @@ Shell toolkit to protect an Apache web server (Debian/Ubuntu, RHEL-compatible): 
 | `scripts/audit-email-problems.sh` | Domain anti-spoofing check: SPF, DMARC, DKIM, MTA-STS, TLS-RPT |
 | `config/` | Tested configs: fail2ban, Apache and SSH hardening, logrotate |
 
+> ⚠️ **Before the first run, add the administrator's IP to `scripts/data/safe-ips.txt`** (it only contains `127.0.0.1`). Otherwise a mistake on your side can ban you from your own server, SSH included. Do not push the completed file to a public repository.
+
 `ban-path-explorer.sh`, `audit-compromise.sh` and the test suite **must run with `sudo`** and refuse to start otherwise. `audit-email-problems.sh` only does DNS lookups and runs without sudo.
 
 ### Quick start
@@ -319,9 +320,9 @@ sudo apt update && sudo apt install -y git iptables iproute2
 sudo git clone https://github.com/daxitsolutions/apache2_ban-hackers.git /opt/apache2_ban-hackers
 cd /opt/apache2_ban-hackers
 
-# 2. Whitelist your admin IPs (IPs, CIDR ranges, # comments)
-sudo install -D -m 600 scripts/safe-ips.example.txt /etc/ban-path-explorer/safe-ips.txt
-sudo nano /etc/ban-path-explorer/safe-ips.txt
+# 2. MANDATORY before the first run: add the administrator's public IP to the whitelist
+echo $SSH_CLIENT | cut -d' ' -f1            # your current IP when connected over SSH
+sudo nano scripts/data/safe-ips.txt         # contains only 127.0.0.1 by default
 
 # 3. Check the server is not already compromised
 sudo ./scripts/audit-compromise.sh --days 60
@@ -348,7 +349,7 @@ sudo iptables -S BAN-PATH-EXPLORER; sudo ip6tables -S BAN-PATH-EXPLORER
 - **Ban durations**: `--ban-duration` (60 min), then 24 h, 7 days, then 30 days for repeat offenders (remembered for 30 days).
 - **Never banned**: whitelisted IPs/ranges, the server's own addresses, private IPs (likely a reverse proxy), invalid values.
 - **Bans survive reboots**: they are re-applied from `/var/lib/ban-path-explorer/state`.
-- **Unban an IP**: add it to `/etc/ban-path-explorer/safe-ips.txt`.
+- **Whitelist**: `scripts/data/safe-ips.txt` (IPs, CIDR ranges, `#` comments). **Unban an IP**: add it there.
 - **Default logs**: `*error*.log`, `*access*.log`, `*error_log`, `*access_log` in `--log-dir`. A warning is shown for Apache logs that are configured but not covered.
 - **Main options**:
   - `--ban` (without it: dry run);
@@ -405,11 +406,7 @@ sudo ./scripts/audit-compromise.sh --days 30 --www /var/www   # read-only
 ### Updating
 
 ```bash
-cd /opt/apache2_ban-hackers && sudo git pull && sudo systemctl restart ban-path-explorer
+cd /opt/apache2_ban-hackers && sudo git pull --autostash && sudo systemctl restart ban-path-explorer
 ```
 
-If you come from a version where the whitelist was `scripts/safe-ips.txt`, back it up first, because `git pull` deletes it:
-
-```bash
-sudo install -D -m 600 scripts/safe-ips.txt /etc/ban-path-explorer/safe-ips.txt
-```
+`--autostash` keeps the IPs you added to `scripts/data/safe-ips.txt`. Older whitelist locations (`scripts/safe-ips.txt`, `/etc/ban-path-explorer/safe-ips.txt`) are still read if present: copy their IPs into `scripts/data/safe-ips.txt`, then delete them.
