@@ -8,17 +8,16 @@
 #   ./ban-path-explorer.sh --log-files "error.log error_site.log" --ignore-paths "favicon.ico,robots.txt"
 #   ./ban-path-explorer.sh --ban --ban-duration 60
 #
-# Exemple de contenu safe-ips.txt :
-#   127.0.0.1
-#   ::1
-#   203.0.113.10
+# Whitelist : /etc/ban-path-explorer/safe-ips.txt (IPs, plages CIDR, # commentaires).
+# Modèle : scripts/safe-ips.example.txt
 
 set -u
 
 VERSION="1.0"
 SCRIPT_NAME="$(basename "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SAFE_IPS_FILE="$SCRIPT_DIR/safe-ips.txt"
+SAFE_IPS_FILE="/etc/ban-path-explorer/safe-ips.txt"   # hors du repo : vos IPs ne sont pas publiées
+REPO_SAFE_IPS_FILE="$SCRIPT_DIR/safe-ips.txt"          # ancien emplacement, migré automatiquement
 BAD_PATTERNS_FILE="$SCRIPT_DIR/bad-patterns.txt"
 TRACK_LOG="/var/log/ban-path-explorer.log"
 BAN_STATE_FILE="/var/lib/ban-path-explorer/state"
@@ -57,6 +56,8 @@ BAN_DURATION_SECONDS="0"
 declare -a LOG_FILES=()
 declare -a IGNORE_PATHS=()
 declare -A SAFE_IPS=()
+declare -a SAFE_CIDRS=()
+declare -A SAFE_CACHE=()
 declare -A BEST_COUNT=()
 declare -A BEST_START=()
 declare -A BEST_END=()
@@ -206,41 +207,89 @@ setup_tracking_files() {
   return 0
 }
 
-get_server_public_ipv4() {
-  ip -4 addr show scope global 2>/dev/null | awk '
-    /inet / {
-      split($2, a, "/");
-      ip=a[1];
-      if (ip ~ /^127\./) next;
-      if (ip ~ /^10\./) next;
-      if (ip ~ /^192\.168\./) next;
-      if (ip ~ /^172\./) {
-        split(ip, b, ".");
-        if (b[2] >= 16 && b[2] <= 31) next;
-      }
-      print ip;
-    }
-  '
-}
-
 ensure_safe_ips_file() {
-  local server_ip
-  if [ ! -f "$SAFE_IPS_FILE" ]; then
-    return 1
-  fi
-  server_ip="$(get_server_public_ipv4)"
-  if [ -n "$server_ip" ] && ! grep -Fxq "$server_ip" "$SAFE_IPS_FILE" 2>/dev/null; then
-    printf '%s\n' "$server_ip" >> "$SAFE_IPS_FILE" 2>/dev/null || return 1
+  [ -f "$SAFE_IPS_FILE" ] && return 0
+  mkdir -p -m 700 "$(dirname "$SAFE_IPS_FILE")" 2>/dev/null || return 1
+  if [ -f "$REPO_SAFE_IPS_FILE" ]; then
+    install -m 600 "$REPO_SAFE_IPS_FILE" "$SAFE_IPS_FILE" || return 1
+    log_track "Whitelist migrée: $REPO_SAFE_IPS_FILE -> $SAFE_IPS_FILE (vous pouvez supprimer l'ancien fichier)"
+  else
+    printf '127.0.0.1\n::1\n' > "$SAFE_IPS_FILE" && chmod 600 "$SAFE_IPS_FILE" || return 1
+    log_track "Avertissement: whitelist absente, $SAFE_IPS_FILE créé vide (ajoutez vos IPs d'administration)"
+    printf 'Avertissement: whitelist créée vide dans %s, ajoutez vos IPs d administration\n' "$SAFE_IPS_FILE" >&2
   fi
   return 0
+}
+
+# IPv6 -> 32 caractères hexadécimaux (développe "::")
+ip6_hex() {
+  local ip="$1" head tail g i n out=""
+  local -a h=() t=()
+  if [[ $ip == *::* ]]; then head="${ip%%::*}"; tail="${ip#*::}"; else head="$ip"; tail=""; fi
+  [ -n "$head" ] && IFS=: read -ra h <<< "$head"
+  [ -n "$tail" ] && IFS=: read -ra t <<< "$tail"
+  n=$((8 - ${#h[@]} - ${#t[@]}))
+  for g in "${h[@]}"; do out+="$(printf '%04x' "0x$g")"; done
+  for ((i = 0; i < n; i++)); do out+="0000"; done
+  for g in "${t[@]}"; do out+="$(printf '%04x' "0x$g")"; done
+  printf '%s' "$out"
+}
+
+ip4_int() {
+  local IFS=.
+  local -a o=($1)
+  printf '%s' "$(( (o[0] << 24) | (o[1] << 16) | (o[2] << 8) | o[3] ))"
+}
+
+# ip_in_cidr IP RESEAU/PREFIXE
+ip_in_cidr() {
+  local ip="$1" net="${2%/*}" bits="${2#*/}" a b full rem
+  case "$ip" in
+    *:*)
+      [[ $net == *:* ]] || return 1
+      a="$(ip6_hex "$ip")"; b="$(ip6_hex "$net")"
+      full=$((bits / 4)); rem=$((bits % 4))
+      [ "${a:0:full}" = "${b:0:full}" ] || return 1
+      [ "$rem" -eq 0 ] && return 0
+      [ $(( (0x${a:full:1} ^ 0x${b:full:1}) >> (4 - rem) )) -eq 0 ]
+      ;;
+    *)
+      [[ $net == *:* ]] && return 1
+      [ "$bits" -eq 0 ] && return 0
+      [ $(( ( $(ip4_int "$ip") ^ $(ip4_int "$net") ) >> (32 - bits) )) -eq 0 ]
+      ;;
+  esac
+}
+
+# Whitelist : IP exacte, plage CIDR, ou adresse locale du serveur
+is_safe_ip() {
+  local ip="$1" c
+  [ -n "${SAFE_IPS[$ip]+x}" ] && return 0
+  [ "${#SAFE_CIDRS[@]}" -eq 0 ] && return 1
+  if [ -z "${SAFE_CACHE[$ip]+x}" ]; then
+    SAFE_CACHE["$ip"]=1
+    for c in "${SAFE_CIDRS[@]}"; do
+      if ip_in_cidr "$ip" "$c"; then SAFE_CACHE["$ip"]=0; break; fi
+    done
+  fi
+  [ "${SAFE_CACHE[$ip]}" -eq 0 ]
 }
 
 load_safe_ips() {
   local ip_line cleaned
   while IFS= read -r ip_line || [ -n "$ip_line" ]; do
-    cleaned="$(trim_spaces "$ip_line")"
+    cleaned="$(trim_spaces "${ip_line%%#*}")"
     [ -z "$cleaned" ] && continue
-    SAFE_IPS["$cleaned"]=1
+    case "$cleaned" in
+      */*)
+        if is_uint "${cleaned#*/}"; then
+          SAFE_CIDRS+=("$cleaned")
+        else
+          log_track "Whitelist: plage ignorée (invalide): $cleaned"
+        fi
+        ;;
+      *) SAFE_IPS["$cleaned"]=1 ;;
+    esac
   done < "$SAFE_IPS_FILE"
 }
 
@@ -510,7 +559,7 @@ cleanup_expired_bans() {
     if ! is_uint "$exp"; then
       continue
     fi
-    if [ -n "${SAFE_IPS[$ip]+x}" ]; then
+    if is_safe_ip "$ip"; then
       # IP ajoutée en whitelist après son ban : on la libère
       ipt "$ip" -D BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1 && log_track "Déblocage (whitelist): $ip"
       continue
@@ -576,7 +625,7 @@ ban_ip() {
     log_track "Ban refusé: IP invalide ou réservée: \"$ip\""
     return 1
   fi
-  if [ -n "${SAFE_IPS[$ip]+x}" ]; then
+  if is_safe_ip "$ip"; then
     log_track "Ban refusé: IP en whitelist ou locale: $ip"
     return 1
   fi
@@ -777,8 +826,8 @@ main() {
     return 1
   fi
   if ! ensure_safe_ips_file; then
-    log_track "Erreur: fichier whitelist manquant: $SAFE_IPS_FILE"
-    printf 'Erreur: fichier whitelist introuvable: %s\n' "$SAFE_IPS_FILE" >&2
+    log_track "Erreur: impossible de préparer la whitelist: $SAFE_IPS_FILE"
+    printf 'Erreur: impossible de préparer la whitelist: %s\n' "$SAFE_IPS_FILE" >&2
     return 1
   fi
   if ! acquire_lock; then
@@ -839,7 +888,7 @@ main() {
     [ -z "${line_ip:-}" ] && continue
     [ -z "${line_path:-}" ] && continue
 
-    if [ -n "${SAFE_IPS[$line_ip]+x}" ]; then
+    if is_safe_ip "$line_ip"; then
       continue
     fi
     if should_ignore_path "$line_path"; then

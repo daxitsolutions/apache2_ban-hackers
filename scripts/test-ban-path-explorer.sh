@@ -11,7 +11,7 @@ TMP_DIR="/tmp/ban-path-test-$$"
 TMP_LOG_DIR="$TMP_DIR/logs"
 TMP_OUT_DIR="$TMP_DIR/out"
 TMP_SCRIPT_COPY="$TMP_DIR/ban-path-explorer.sh"
-TMP_SAFE_IPS_FILE="$TMP_DIR/safe-ips.txt"
+TMP_SAFE_IPS_FILE="$TMP_DIR/ban-path-explorer.state.safe-ips"
 TMP_TRACK_LOG="$TMP_DIR/ban-path-explorer.log"
 TMP_BAN_STATE="$TMP_DIR/ban-path-explorer.state"
 TRACK_LOG_REAL="/var/log/ban-path-explorer.log"
@@ -115,6 +115,7 @@ prepare_isolated_script_copy() {
   awk -v track="$TMP_TRACK_LOG" -v state="$TMP_BAN_STATE" '
     /^TRACK_LOG=/ { print "TRACK_LOG=\"" track "\""; next }
     /^BAN_STATE_FILE=/ { print "BAN_STATE_FILE=\"" state "\""; next }
+    /^SAFE_IPS_FILE=/ { print "SAFE_IPS_FILE=\"" state ".safe-ips\""; next }
     /^LOCK_DIR_BASE=/ { print "LOCK_DIR_BASE=\"" state ".lock\""; next }
     /^LEGACY_BAN_STATE_FILE=/ { print "LEGACY_BAN_STATE_FILE=\"" state ".legacy\""; next }
     { print }
@@ -383,6 +384,22 @@ run_access_tests() {
   ban_check "Access #1 (brute force POST détecté)" grep -qx 'IP suspecte : 203.0.113.10' "$out"
   ban_check "Access #1 (visiteur 200 non suspect)" bash -c "! grep -q '203.0.113.12' '$out'"
   ban_check "Access #1 (404 error+access comptés une fois)" bash -c "! grep -q '203.0.113.11' '$out'"
+
+  # #11 : whitelist par plage CIDR (IPv4 et IPv6), commentaires acceptés
+  printf '198.51.100.0/24   # bureau\n2001:db8:abcd::/48\n' >> "$TMP_SAFE_IPS_FILE"
+  for i in 1 2 3 4 5 6; do
+    acc 198.51.100.77 "$i" "GET /a$i.php" 404
+    acc 198.51.101.1 "$i" "GET /b$i.php" 404
+    acc 2001:db8:abcd:1::5 "$i" "GET /c$i.php" 404
+    acc 2001:db8:abce::1 "$i" "GET /d$i.php" 404
+  done > "$d/site_access.log"
+  : > "$d/error.log"
+  run_isolated "$out" --log-dir "$d" --threshold 5 --window 30
+  ban_check "Whitelist #11 (CIDR IPv4 respecté)" bash -c "! grep -q '198.51.100.77' '$out'"
+  ban_check "Whitelist #11 (hors CIDR IPv4 détecté)" grep -qx 'IP suspecte : 198.51.101.1' "$out"
+  ban_check "Whitelist #11 (CIDR IPv6 /48 respecté)" bash -c "! grep -q '2001:db8:abcd:1::5' '$out'"
+  ban_check "Whitelist #11 (hors CIDR IPv6 détecté)" grep -qx 'IP suspecte : 2001:db8:abce::1' "$out"
+  prepare_safe_ips_for_test
 
   # #2 : une seule requête malveillante suffit
   {
