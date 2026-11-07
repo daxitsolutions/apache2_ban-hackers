@@ -74,6 +74,7 @@ Exécution en arrière-plan:
 Options:
   --log-dir DIR            Dossier des logs Apache (défaut: $DEFAULT_LOG_DIR)
   --log-files "F1 F2 ..."  Liste de fichiers logs séparés par des espaces
+                           (défaut: error*.log et *access*.log de --log-dir)
   --threshold N            Seuil d'URLs différentes par IP (défaut: $DEFAULT_THRESHOLD)
   --window MIN             Fenêtre glissante en minutes (défaut: $DEFAULT_WINDOW_MINUTES)
   --max-log-lines N        Max lignes lues par fichier log (défaut: $DEFAULT_MAX_LOG_LINES)
@@ -258,12 +259,12 @@ apache_to_unix_ts() {
   if printf '%s' "$apache_ts" | grep -Eq '^[0-9]{2}/[A-Za-z]{3}/[0-9]{4}:'; then
     first="${apache_ts%%:*}"
     rest="${apache_ts#*:}"
-    normalized="$first $rest"
+    normalized="${first//\// } $rest"   # "06 Apr 2026 18:07:29 +0000" : lisible par GNU date (pas "06/Apr/2026")
     if date -d "$normalized" '+%s' >/dev/null 2>&1; then
       date -d "$normalized" '+%s' 2>/dev/null
       return 0
     fi
-    date -j -f '%d/%b/%Y %H:%M:%S %z' "$normalized" '+%s' 2>/dev/null
+    date -j -f '%d %b %Y %H:%M:%S %z' "$normalized" '+%s' 2>/dev/null
     return $?
   fi
 
@@ -290,7 +291,7 @@ build_log_files_list() {
       fi
     done
   else
-    for f in "$LOG_DIR"/error*.log; do
+    for f in "$LOG_DIR"/error*.log "$LOG_DIR"/*access*.log; do
       [ -f "$f" ] || continue
       LOG_FILES+=("$f")
     done
@@ -311,6 +312,35 @@ parse_logs_to_tmp() {
         i = start
         while (i <= NR) {
           line = buf[i % max]
+          # Access log (format common/combined, ou other_vhosts "vhost:port IP ...")
+          if (substr(line, 1, 1) != "[") {
+            split(line, f, " ")
+            ip = f[1]
+            if (ip ~ /:[0-9]+$/ && f[2] ~ /^[0-9A-Fa-f.:]+$/) ip = f[2]
+            sub(/^::[fF][fF][fF][fF]:/, "", ip)
+            lb = index(line, "[")
+            rb = index(line, "]")
+            q = index(line, "\"")
+            if (lb == 0 || rb <= lb || q <= rb) { i++; continue }
+            ts = substr(line, lb + 1, rb - lb - 1)
+            rest = substr(line, q + 1)
+            # fin de la requête = guillemet non échappé suivi du code HTTP
+            if (!match(rest, /[^\\]" [0-9][0-9][0-9] /)) { i++; continue }
+            req = substr(rest, 1, RSTART)
+            status = substr(rest, RSTART + 3, 3)
+            split(req, r, " ")
+            url = r[2]
+            sub(/\?.*/, "", url)
+            if (url == "") { i++; continue }
+            if (status ~ /^(400|403|404|405)$/) {
+              print ts "\t" ip "\t" url "\t" FILENAME
+            } else if (r[1] == "POST" && url ~ /(wp-login|xmlrpc)\.php$/) {
+              # ponytail: brute force = N POST distincts (le compteur porte sur les chemins uniques)
+              print ts "\t" ip "\tPOST " url " #" i "\t" FILENAME
+            }
+            i++
+            continue
+          }
           if (line ~ /\[[^]]*error\]/ &&
               (line ~ /File does not exist: / ||
                line ~ /AH01276:/ ||
@@ -732,7 +762,7 @@ main() {
   analyzed_count="${#LOG_FILES[@]}"
   now_header="$(date '+%Y-%m-%d %H:%M')"
   say "[$now_header] Ban Path Explorer v$VERSION"
-  say "Analysé : $analyzed_count fichiers error*.log"
+  say "Analysé : $analyzed_count fichiers log (error*.log + *access*.log)"
   say "Fenêtre : $WINDOW_MINUTES minutes | Seuil : $THRESHOLD URLs différentes"
 
   log_track "Démarrage v$VERSION | log-dir=$LOG_DIR | files=\"$LOG_FILES_RAW\" | threshold=$THRESHOLD | window=$WINDOW_MINUTES | ban=$BAN_ENABLED | ban-duration=$BAN_DURATION_MINUTES | quiet=$QUIET | ignore=\"$IGNORE_PATHS_RAW\" | max-log-lines=$MAX_LOG_LINES | max-events=$MAX_EVENTS | lock-dir=$LOCK_DIR"
@@ -799,6 +829,8 @@ main() {
   declare -a WINDOW_TS=()
   declare -a WINDOW_PATHS=()
   declare -A WINDOW_PATH_COUNT=()
+  declare -A WINDOW_SAMPLE=()
+  local path_key
 
   while IFS='|' read -r line_ip unix_ts line_path || [ -n "${line_ip}${unix_ts}${line_path}" ]; do
     [ -z "${line_ip:-}" ] && continue
@@ -814,6 +846,13 @@ main() {
       idx=0
     fi
 
+    # ponytail: clé = dernier segment du chemin, pour ne pas compter deux fois le même 404 vu
+    # dans error.log (/var/www/site/x.php) et access.log (/x.php). Sous-compte /a/x.php vs /b/x.php.
+    path_key="${line_path%/}"
+    path_key="${path_key##*/}"
+    [ -z "$path_key" ] && path_key="/"
+    WINDOW_SAMPLE["$path_key"]="$line_path"
+    line_path="$path_key"
     WINDOW_TS+=("$unix_ts")
     WINDOW_PATHS+=("$line_path")
     if [ -n "${WINDOW_PATH_COUNT[$line_path]+x}" ]; then
@@ -848,9 +887,9 @@ main() {
         for ip in "${!WINDOW_PATH_COUNT[@]}"; do
           if [ "$max_paths" -lt 10 ]; then
             if [ -z "$first_paths" ]; then
-              first_paths="$ip"
+              first_paths="${WINDOW_SAMPLE[$ip]}"
             else
-              first_paths="$first_paths, $ip"
+              first_paths="$first_paths, ${WINDOW_SAMPLE[$ip]}"
             fi
           fi
           max_paths=$((max_paths + 1))

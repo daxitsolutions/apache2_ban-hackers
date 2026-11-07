@@ -148,7 +148,7 @@ count_suspects_in_output() {
 has_keywords_for_summary() {
   local file="$1"
   grep -q "Analysé" "$file" &&
-  grep -Fq "fichiers error*.log" "$file" &&
+  grep -Fq "fichiers log" "$file" &&
   grep -q "Fenêtre" "$file" &&
   grep -q "Seuil" "$file"
 }
@@ -359,6 +359,30 @@ php_err() {
   printf "[Mon Apr 06 18:%02d:00.000000 2026] [php7:error] [pid 1:tid 1] [client %s] script '/var/www/site/%s' not found or unable to stat\n" "$3" "$1" "$2"
 }
 
+acc() {
+  # acc IP minute "METHODE URL" statut
+  printf '%s - - [06/Apr/2026:18:%02d:00 +0000] "%s HTTP/1.1" %s 123 "-" "Mozilla/5.0"\n' "$1" "$2" "$3" "$4"
+}
+
+run_access_tests() {
+  local d="$TMP_DIR/access-logs" out="$TMP_OUT_DIR/access.out" i
+  mkdir -p "$d"
+  for i in 1 2 3 4 5 6; do
+    acc 203.0.113.9 "$i" "GET /admin$i.php?x=1" 404                      # scan sur un site PHP (rien dans error.log)
+    acc 203.0.113.10 "$i" "POST /wp-login.php" 200                       # brute force WordPress
+    acc 203.0.113.12 "$i" "GET /page$i" 200                              # visiteur légitime
+    acc 203.0.113.11 "$i" "GET /img$((i % 3)).png" 404                   # 3 images cassées...
+    php_err "203.0.113.11:999" "img$((i % 3)).png" "$i"                  # ...vues aussi dans error.log
+  done > "$d/site_access.log"
+  grep -F '[pid' "$d/site_access.log" > "$d/error.log"
+  grep -vF '[pid' "$d/site_access.log" > "$d/tmp" && mv "$d/tmp" "$d/site_access.log"
+  run_isolated "$out" --log-dir "$d" --threshold 5 --window 30
+  ban_check "Access #1 (scan 404 détecté)" grep -qx 'IP suspecte : 203.0.113.9' "$out"
+  ban_check "Access #1 (brute force POST détecté)" grep -qx 'IP suspecte : 203.0.113.10' "$out"
+  ban_check "Access #1 (visiteur 200 non suspect)" bash -c "! grep -q '203.0.113.12' '$out'"
+  ban_check "Access #1 (404 error+access comptés une fois)" bash -c "! grep -q '203.0.113.11' '$out'"
+}
+
 run_ban_tests() {
   local d="$TMP_DIR/ban-logs" out="$TMP_OUT_DIR/ban.out" i
   [ "${BAN_TESTS:-0}" = "1" ] || return 0
@@ -406,6 +430,7 @@ if [ "$?" -eq 0 ]; then
 else
   trap cleanup EXIT
   run_tests || FAIL_COUNT=$((FAIL_COUNT + 1))
+  run_access_tests
   run_ban_tests
 
   echo "=== TEST ban-path-explorer.sh ==="
