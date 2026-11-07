@@ -115,6 +115,7 @@ prepare_isolated_script_copy() {
   awk -v track="$TMP_TRACK_LOG" -v state="$TMP_BAN_STATE" '
     /^TRACK_LOG=/ { print "TRACK_LOG=\"" track "\""; next }
     /^BAN_STATE_FILE=/ { print "BAN_STATE_FILE=\"" state "\""; next }
+    /^LOCK_DIR_BASE=/ { print "LOCK_DIR_BASE=\"" state ".lock\""; next }
     /^LEGACY_BAN_STATE_FILE=/ { print "LEGACY_BAN_STATE_FILE=\"" state ".legacy\""; next }
     { print }
   ' "$TMP_SCRIPT_COPY" > "$TMP_SCRIPT_COPY.tmp" || return 1
@@ -448,6 +449,9 @@ run_ban_tests() {
   run_isolated "$out" --log-dir "$d" --ban
   ban_check "Ban #5 (whitelist ajoutée = déblocage)" bash -c "! iptables -w -S BAN-PATH-EXPLORER | grep -q 198.51.100.7"
   prepare_safe_ips_for_test
+
+  # #10 : aucun fichier de travail prévisible ni résidu après exécution
+  ban_check "Sécu #10 (aucun résidu /tmp ni fichier d'état temporaire)" bash -c "! ls -d /tmp/ban-path-explorer.* '$TMP_BAN_STATE'.?????? 2>/dev/null | grep -q ."
 
   # #2 : une signature déclenche le ban iptables sans seuil
   reset_bans
