@@ -137,6 +137,14 @@ load_local_ips() {
   done < <(ip -o addr show 2>/dev/null | awk '{ split($4, a, "/"); print a[1] }')
 }
 
+# ipt IP args... : iptables pour une IPv4, ip6tables pour une IPv6
+ipt() {
+  case "$1" in
+    *:*) shift; ip6tables -w "$@" ;;
+    *) shift; iptables -w "$@" ;;
+  esac
+}
+
 trim_spaces() {
   local s="$1"
   s="${s#"${s%%[![:space:]]*}"}"
@@ -324,7 +332,13 @@ parse_logs_to_tmp() {
                 ip=substr(client_part, 1, client_end - 1)
                 split(ip, ipa, " ")
                 ip=ipa[1]
+                # IPv4 mappée en IPv6 (::ffff:1.2.3.4) : le paquet arrive en IPv4, on banne en IPv4
+                sub(/^::[fF][fF][fF][fF]:/, "", ip)
                 if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$/) {
+                  sub(/:[0-9]+$/, "", ip)
+                } else if (ip ~ /^[0-9A-Fa-f:]+:[0-9]+$/ && index(line, "[pid ") > 0) {
+                  # ponytail: Apache 2.4 écrit "[client 2001:db8::1:54321]" (IPv6 + port, sans crochets) ;
+                  # on retire le dernier segment. Format ErrorLogFormat personnalisé sans port = adresse fausse.
                   sub(/:[0-9]+$/, "", ip)
                 } else if (ip ~ /^\[[0-9A-Fa-f:]+\]:[0-9]+$/) {
                   sub(/^\[/, "", ip)
@@ -424,8 +438,8 @@ cleanup_expired_bans() {
       continue
     fi
     if [ "$exp" -le "$now_ts" ]; then
-      if iptables -w -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
-        iptables -w -D BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1
+      if ipt "$ip" -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
+        ipt "$ip" -D BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1
         log_track "Déblocage expiré: $ip"
       fi
     else
@@ -437,14 +451,22 @@ cleanup_expired_bans() {
 }
 
 ensure_ban_chain() {
-  if ! iptables -w -L BAN-PATH-EXPLORER -n >/dev/null 2>&1; then
-    iptables -w -N BAN-PATH-EXPLORER >/dev/null 2>&1 || return 1
-    log_track "Chaîne iptables créée: BAN-PATH-EXPLORER"
-  fi
-  if ! iptables -w -C INPUT -j BAN-PATH-EXPLORER >/dev/null 2>&1; then
-    iptables -w -I INPUT -j BAN-PATH-EXPLORER >/dev/null 2>&1 || return 1
-    log_track "Chaîne BAN-PATH-EXPLORER insérée dans INPUT"
-  fi
+  local cmd
+  for cmd in iptables ip6tables; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      [ "$cmd" = "iptables" ] && return 1
+      log_track "Avertissement: ip6tables absent, les IPv6 ne pourront pas être bannies"
+      continue
+    fi
+    if ! "$cmd" -w -L BAN-PATH-EXPLORER -n >/dev/null 2>&1; then
+      "$cmd" -w -N BAN-PATH-EXPLORER >/dev/null 2>&1 || return 1
+      log_track "Chaîne $cmd créée: BAN-PATH-EXPLORER"
+    fi
+    if ! "$cmd" -w -C INPUT -j BAN-PATH-EXPLORER >/dev/null 2>&1; then
+      "$cmd" -w -I INPUT -j BAN-PATH-EXPLORER >/dev/null 2>&1 || return 1
+      log_track "Chaîne BAN-PATH-EXPLORER insérée dans INPUT ($cmd)"
+    fi
+  done
   return 0
 }
 
@@ -477,12 +499,12 @@ ban_ip() {
     log_track "Ban refusé: IP en whitelist ou locale: $ip"
     return 1
   fi
-  if iptables -w -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
+  if ipt "$ip" -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
     update_ban_state "$ip" "$until_ts"
     log_track "IP déjà bannie: règle iptables existante, aucun ajout: $ip (expiration mise à jour: $until_ts)"
     return 0
   fi
-  if iptables -w -A BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
+  if ipt "$ip" -A BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
     update_ban_state "$ip" "$until_ts"
     log_track "IP bannie: $ip (jusqu'à $until_ts)"
     return 0
