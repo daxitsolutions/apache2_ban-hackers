@@ -108,6 +108,35 @@ is_uint() {
   esac
 }
 
+# Accepte uniquement une IPv4/IPv6 unique (jamais de CIDR, de nom d'hôte ni d'adresse "tout le monde").
+is_valid_ip() {
+  local ip="$1" o
+  case "$ip" in
+    ''|*/*) return 1 ;;
+    *:*)
+      [[ $ip =~ ^[0-9A-Fa-f:]+$ ]] || return 1
+      [ "$ip" != "::" ] && [ "$ip" != "::1" ]
+      return
+      ;;
+  esac
+  [[ $ip =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  for o in "${BASH_REMATCH[@]:1}"; do
+    [ "$((10#$o))" -le 255 ] || return 1
+  done
+  case "$ip" in
+    0.*|127.*|255.255.255.255) return 1 ;;
+  esac
+  return 0
+}
+
+# Toutes les adresses locales du serveur (v4 + v6) : jamais bannies, même absentes de safe-ips.txt.
+load_local_ips() {
+  local addr
+  while read -r addr; do
+    [ -n "$addr" ] && SAFE_IPS["$addr"]=1
+  done < <(ip -o addr show 2>/dev/null | awk '{ split($4, a, "/"); print a[1] }')
+}
+
 trim_spaces() {
   local s="$1"
   s="${s#"${s%%[![:space:]]*}"}"
@@ -395,8 +424,8 @@ cleanup_expired_bans() {
       continue
     fi
     if [ "$exp" -le "$now_ts" ]; then
-      if iptables -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
-        iptables -D BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1
+      if iptables -w -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
+        iptables -w -D BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1
         log_track "Déblocage expiré: $ip"
       fi
     else
@@ -408,12 +437,12 @@ cleanup_expired_bans() {
 }
 
 ensure_ban_chain() {
-  if ! iptables -L BAN-PATH-EXPLORER -n >/dev/null 2>&1; then
-    iptables -N BAN-PATH-EXPLORER >/dev/null 2>&1 || return 1
+  if ! iptables -w -L BAN-PATH-EXPLORER -n >/dev/null 2>&1; then
+    iptables -w -N BAN-PATH-EXPLORER >/dev/null 2>&1 || return 1
     log_track "Chaîne iptables créée: BAN-PATH-EXPLORER"
   fi
-  if ! iptables -C INPUT -j BAN-PATH-EXPLORER >/dev/null 2>&1; then
-    iptables -I INPUT -j BAN-PATH-EXPLORER >/dev/null 2>&1 || return 1
+  if ! iptables -w -C INPUT -j BAN-PATH-EXPLORER >/dev/null 2>&1; then
+    iptables -w -I INPUT -j BAN-PATH-EXPLORER >/dev/null 2>&1 || return 1
     log_track "Chaîne BAN-PATH-EXPLORER insérée dans INPUT"
   fi
   return 0
@@ -440,12 +469,20 @@ update_ban_state() {
 ban_ip() {
   local ip="$1"
   local until_ts="$2"
-  if iptables -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
+  if ! is_valid_ip "$ip"; then
+    log_track "Ban refusé: IP invalide ou réservée: \"$ip\""
+    return 1
+  fi
+  if [ -n "${SAFE_IPS[$ip]+x}" ]; then
+    log_track "Ban refusé: IP en whitelist ou locale: $ip"
+    return 1
+  fi
+  if iptables -w -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
     update_ban_state "$ip" "$until_ts"
     log_track "IP déjà bannie: règle iptables existante, aucun ajout: $ip (expiration mise à jour: $until_ts)"
     return 0
   fi
-  if iptables -A BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
+  if iptables -w -A BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
     update_ban_state "$ip" "$until_ts"
     log_track "IP bannie: $ip (jusqu'à $until_ts)"
     return 0
@@ -650,6 +687,7 @@ main() {
   trap 'release_lock' return INT TERM
 
   load_safe_ips
+  load_local_ips
   parse_ignore_paths
   build_log_files_list
 

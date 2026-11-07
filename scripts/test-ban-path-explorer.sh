@@ -141,7 +141,7 @@ run_isolated() {
 
 count_suspects_in_output() {
   local file="$1"
-  grep -c '^IP suspecte :' "$file" 2>/dev/null || echo "0"
+  grep -c '^IP suspecte :' "$file" 2>/dev/null || true
 }
 
 has_keywords_for_summary() {
@@ -216,6 +216,7 @@ run_tests() {
     esac
   fi
 
+  mkdir -p "$TMP_LOG_DIR" "$TMP_OUT_DIR" || return 1
   snapshot_track_log_before
   prepare_safe_ips_for_test
   if ! prepare_isolated_script_copy; then
@@ -327,12 +328,62 @@ EOF
   fi
 }
 
+# Tests iptables réels : à lancer uniquement en conteneur jetable (root + BAN_TESTS=1), ex. :
+#   docker run --rm --cap-add NET_ADMIN -v "$PWD":/repo -w /repo -e BAN_TESTS=1 <image debian + iptables> ./scripts/test-ban-path-explorer.sh
+BAN_RESULTS=""
+ban_check() {
+  local name="$1"
+  shift
+  if "$@"; then
+    BAN_RESULTS="$BAN_RESULTS$name : OK"$'\n'
+  else
+    BAN_RESULTS="$BAN_RESULTS$name : FAIL"$'\n'
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+reset_bans() {
+  iptables -w -F BAN-PATH-EXPLORER >/dev/null 2>&1 || true
+  ip6tables -w -F BAN-PATH-EXPLORER >/dev/null 2>&1 || true
+  : > "$TMP_BAN_STATE"
+  : > "$TMP_TRACK_LOG"
+}
+
+has_rule() {
+  "$1" -w -S BAN-PATH-EXPLORER 2>/dev/null | grep -q -- "-s $2"
+}
+
+php_err() {
+  # php_err IP chemin minute
+  printf "[Mon Apr 06 18:%02d:00.000000 2026] [php7:error] [pid 1:tid 1] [client %s] script '/var/www/site/%s' not found or unable to stat\n" "$3" "$1" "$2"
+}
+
+run_ban_tests() {
+  local d="$TMP_DIR/ban-logs" out="$TMP_OUT_DIR/ban.out" i
+  [ "${BAN_TESTS:-0}" = "1" ] || return 0
+  if [ "$(id -u)" != "0" ] || ! command -v iptables >/dev/null 2>&1; then
+    BAN_RESULTS="Tests iptables : SKIP (root + iptables requis)"$'\n'
+    return 0
+  fi
+  mkdir -p "$d"
+
+  # #4 : un nom d'hôte ou une adresse réservée ne doit jamais atteindre iptables
+  reset_bans
+  for i in 1 2 3 4 5 6; do
+    php_err "evil.example.com:1234" "x$i.php" "$i"
+    php_err "0.0.0.0:1234" "y$i.php" "$i"
+  done > "$d/error.log"
+  run_isolated "$out" --log-dir "$d" --threshold 5 --ban
+  ban_check "Ban #4 (IP invalide refusée)" bash -c "grep -q 'Ban refusé: IP invalide' '$TMP_TRACK_LOG' && ! iptables -w -S BAN-PATH-EXPLORER | grep -q -- '-s '"
+}
+
 early_help_return "$@"
 if [ "$?" -eq 0 ]; then
   :
 else
   trap cleanup EXIT
-  run_tests
+  run_tests || FAIL_COUNT=$((FAIL_COUNT + 1))
+  run_ban_tests
 
   echo "=== TEST ban-path-explorer.sh ==="
   echo "Test 1 : $TEST1_STATUS"
@@ -341,6 +392,7 @@ else
   echo "Test 4 : $TEST4_STATUS"
   echo "Test 5 : $TEST5_STATUS"
   echo "Test 6 : $TEST6_STATUS"
+  printf '%s' "$BAN_RESULTS"
 
   if [ "$FAIL_COUNT" -eq 0 ]; then
     echo "Tous les tests sont passés avec succès."
