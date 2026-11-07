@@ -114,6 +114,7 @@ prepare_isolated_script_copy() {
   awk -v track="$TMP_TRACK_LOG" -v state="$TMP_BAN_STATE" '
     /^TRACK_LOG=/ { print "TRACK_LOG=\"" track "\""; next }
     /^BAN_STATE_FILE=/ { print "BAN_STATE_FILE=\"" state "\""; next }
+    /^LEGACY_BAN_STATE_FILE=/ { print "LEGACY_BAN_STATE_FILE=\"" state ".legacy\""; next }
     { print }
   ' "$TMP_SCRIPT_COPY" > "$TMP_SCRIPT_COPY.tmp" || return 1
   cp -- "$TMP_SCRIPT_COPY.tmp" "$TMP_SCRIPT_COPY" || return 1
@@ -385,6 +386,18 @@ run_ban_tests() {
   run_isolated "$out" --log-dir "$d" --threshold 5 --ban
   ban_check "Ban #3 (IPv6 bannie via ip6tables)" has_rule ip6tables "2001:db8::bad/128"
   ban_check "Ban #3 (IPv4 mappée bannie en IPv4)" has_rule iptables "198.51.100.7/32"
+
+  # #5 : après un redémarrage (chaîne vidée), les bans encore valides sont réappliqués
+  iptables -w -F BAN-PATH-EXPLORER
+  ip6tables -w -F BAN-PATH-EXPLORER
+  : > "$d/error.log"
+  run_isolated "$out" --log-dir "$d" --ban
+  ban_check "Ban #5 (IPv4 restaurée après flush)" has_rule iptables "198.51.100.7/32"
+  ban_check "Ban #5 (IPv6 restaurée après flush)" has_rule ip6tables "2001:db8::bad/128"
+  echo "198.51.100.7" >> "$TMP_SAFE_IPS_FILE"
+  run_isolated "$out" --log-dir "$d" --ban
+  ban_check "Ban #5 (whitelist ajoutée = déblocage)" bash -c "! iptables -w -S BAN-PATH-EXPLORER | grep -q 198.51.100.7"
+  prepare_safe_ips_for_test
 }
 
 early_help_return "$@"
