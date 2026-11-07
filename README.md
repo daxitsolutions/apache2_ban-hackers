@@ -106,6 +106,7 @@ Tous les scripts sont centralisés dans `scripts/` pour faciliter l'ajout de nou
 - `scripts/ban-path-explorer.sh` : détection de scans de chemins dans les logs Apache
 - `scripts/test-ban-path-explorer.sh` : tests du script principal
 - `scripts/safe-ips.example.txt` : modèle de whitelist. La vraie whitelist est dans `/etc/ban-path-explorer/safe-ips.txt`, **hors du repo** pour ne pas publier vos IPs. Elle accepte les IPs, les plages CIDR (`198.51.100.0/24`, `2001:db8::/48`) et les commentaires `#`
+- `scripts/audit-email-problems.sh DOMAINE [sélecteurs DKIM]` : audit SPF, DMARC, DKIM, MTA-STS et TLS-RPT (exemple : `./scripts/audit-email-problems.sh daxit.be`)
 - `scripts/audit-compromise.sh` : recherche de traces de compromission après une attaque (lecture seule)
 - `scripts/bad-patterns.txt` : signatures d'attaque (`/.env`, `../`, `${jndi:`, `union select`…) qui déclenchent un ban dès la première requête
 
@@ -264,6 +265,7 @@ All scripts are grouped under `scripts/` so new tools can be added consistently.
 - `scripts/ban-path-explorer.sh`: detects path-scanning behavior in Apache logs
 - `scripts/test-ban-path-explorer.sh`: test runner for the main script
 - `scripts/safe-ips.example.txt`: whitelist template. The real whitelist lives in `/etc/ban-path-explorer/safe-ips.txt`, **outside the repo**, so your IPs are not published. Supports IPs, CIDR ranges and `#` comments
+- `scripts/audit-email-problems.sh DOMAIN [DKIM selectors]`: SPF, DMARC, DKIM, MTA-STS and TLS-RPT audit
 - `scripts/audit-compromise.sh`: post-attack compromise indicators (read-only)
 - `scripts/bad-patterns.txt`: attack signatures (`/.env`, `../`, `${jndi:`, `union select`…) that trigger a ban on the very first request
 
