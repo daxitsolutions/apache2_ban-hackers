@@ -133,6 +133,23 @@ is_valid_ip() {
   return 0
 }
 
+# Adresses privées : derrière un reverse proxy/load balancer, c'est l'IP du proxy qui apparaît
+# dans les logs ; la bannir couperait tout le site. Le vrai client s'obtient via mod_remoteip.
+is_private_ip() {
+  local ip
+  ip="$(printf '%s' "$1" | tr 'A-F' 'a-f')"
+  case "$ip" in
+    10.*|192.168.*|169.254.*|fc*|fd*|fe8*|fe9*|fea*|feb*) return 0 ;;
+    172.*)
+      local b="${ip#172.}"; b="${b%%.*}"
+      [ "$b" -ge 16 ] && [ "$b" -le 31 ] ;;
+    100.*)
+      local b="${ip#100.}"; b="${b%%.*}"
+      [ "$b" -ge 64 ] && [ "$b" -le 127 ] ;;
+    *) return 1 ;;
+  esac
+}
+
 # Toutes les adresses locales du serveur (v4 + v6) : jamais bannies, même absentes de safe-ips.txt.
 load_local_ips() {
   local addr
@@ -564,6 +581,10 @@ ban_ip() {
   fi
   if [ -n "${SAFE_IPS[$ip]+x}" ]; then
     log_track "Ban refusé: IP en whitelist ou locale: $ip"
+    return 1
+  fi
+  if is_private_ip "$ip"; then
+    log_track "Ban refusé: IP privée $ip (reverse proxy ? configurer mod_remoteip, voir README)"
     return 1
   fi
   if ipt "$ip" -C BAN-PATH-EXPLORER -s "$ip" -j DROP >/dev/null 2>&1; then
