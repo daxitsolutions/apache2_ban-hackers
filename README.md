@@ -133,6 +133,8 @@ sudo ./scripts/check-ip.sh 203.0.113.10
 
 Le script, en lecture seule, interroge le pare-feu, l'état des bans et le journal (archives comprises), ainsi que fail2ban et CrowdSec s'ils sont installés. Code de retour : 0 = bloquée, 1 = non bloquée, 2 = erreur ou indéterminé.
 
+Si l'IP n'est pas bloquée, ou si le résultat est indéterminé, le script propose de **diagnostiquer pourquoi l'accès pose problème**. Répondez `oui` pour contrôler, toujours en lecture seule, les autres règles de pare-feu (règles citant l'IP, plages bloquées, nftables, ipset), la route vers l'IP, la configuration (Apache, ModSecurity, `hosts.deny`, `.htaccess`), le service web, les logs HTTP et SSH de cette IP. Le script termine par une liste de pistes. Le diagnostic ne change pas le code de retour, et la question est sautée sans entrée disponible (cron, `</dev/null`).
+
 | Ligne du journal | Signification |
 |---|---|
 | `IP suspecte: … unique_urls=N … paths="…"` | Scan ou brute force : N chemins différents en erreur (aperçu dans `paths`) |
@@ -378,7 +380,7 @@ sudo iptables -S BAN-PATH-EXPLORER; sudo ip6tables -S BAN-PATH-EXPLORER
   sudo ./scripts/check-ip.sh 203.0.113.10
   ```
 
-  Read-only; checks the firewall, ban state and logs (rotated ones included), plus fail2ban and CrowdSec if installed. Exit code: 0 = blocked, 1 = not blocked, 2 = error or undetermined. In the log, `unique_urls=N … paths="…"` means a scan or brute force, `signature="…"` an attack pattern or ModSecurity block, and `Ban refusé` that the IP was not blocked (whitelisted, server address, private or invalid).
+  Read-only; checks the firewall, ban state and logs (rotated ones included), plus fail2ban and CrowdSec if installed. Exit code: 0 = blocked, 1 = not blocked, 2 = error or undetermined. If the IP is not blocked or the result is undetermined, the script offers an access diagnosis (answer `oui`): other firewall rules, route, Apache/ModSecurity/`.htaccess` configuration, web service, HTTP and SSH logs, then a list of leads. It does not change the exit code. In the log, `unique_urls=N … paths="…"` means a scan or brute force, `signature="…"` an attack pattern or ModSecurity block, and `Ban refusé` that the IP was not blocked (whitelisted, server address, private or invalid).
 - **Default logs**: `*error*.log`, `*access*.log`, `*error_log`, `*access_log` in `--log-dir`. A warning is shown for Apache logs that are configured but not covered.
 - **Main options**:
   - `--ban` (without it: dry run);
