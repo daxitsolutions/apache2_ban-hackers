@@ -8,7 +8,6 @@ set -u
 
 REQUIRE_ROOT="1"   # mis à 0 uniquement par le script de test (copie isolée)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SAFE_IPS_FILE="$SCRIPT_DIR/data/safe-ips.txt"
 TRACK_LOG="/var/log/ban-path-explorer.log"
 BAN_STATE_FILE="/var/lib/ban-path-explorer/state"
 LOCK_DIR="/run/ban-path-explorer.lock"   # verrou partagé avec ban-path-explorer.sh
@@ -71,6 +70,19 @@ mark_released() {
     return 0
   fi
   rm -f "$tmp"
+  return 1
+}
+
+# La whitelist à modifier est celle que lit le service, où que ce script ait été copié
+find_safelist() {
+  local exec_path f
+  exec_path="$(systemctl cat ban-path-explorer 2>/dev/null | sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' | head -n 1)"
+  for f in "$(dirname "${exec_path:-/nonexistent/x}")/data/safe-ips.txt" "$SCRIPT_DIR/data/safe-ips.txt" "$SCRIPT_DIR/safe-ips.txt"; do
+    if [ -f "$f" ]; then
+      printf '%s\n' "$f"
+      return 0
+    fi
+  done
   return 1
 }
 
@@ -181,6 +193,10 @@ else
 fi
 
 echo
+if ! SAFE_IPS_FILE="$(find_safelist)"; then
+  echo "Erreur : liste des IP saines introuvable (data/safe-ips.txt), IP non ajoutée"
+  exit 2
+fi
 if in_safelist; then
   echo "$IP est déjà dans la liste des IP saines ($SAFE_IPS_FILE)"
   exit "$verdict"

@@ -36,12 +36,17 @@ cat > "$T/bin/crowdsec-cli" <<'FAKE'
 dir="$(dirname "$0")/.."
 if [ "$2" = "list" ]; then cat "$dir/cs"; else echo "$*" >> "$dir/called"; fi
 FAKE
+cat > "$T/bin/systemctl" <<'FAKE'
+#!/usr/bin/env bash
+cat "$(dirname "$0")/../unit" 2>/dev/null
+FAKE
 cp "$T/bin/iptables" "$T/bin/ip6tables"
 chmod +x "$T"/bin/*
 
 reset() {
   : > "$T/rules"; : > "$T/state"; : > "$T/ban.log"; : > "$T/called"
-  rm -f "$T/ipt-broken" "$T/ipt-nodel"; rm -rf "$T/lock"
+  rm -f "$T/ipt-broken" "$T/ipt-nodel" "$T/unit" "$T/safe-ips.txt"; rm -rf "$T/lock" "$T/svc"
+  mkdir -p "$T/data"
   printf '127.0.0.1\n' > "$T/data/safe-ips.txt"
   echo "[[]]" > "$T/f2b"
   echo "No active decisions" > "$T/cs"
@@ -97,6 +102,24 @@ expect "Déjà whitelistée : pas de doublon" test "$(grep -c $IP_T "$T/data/saf
 reset; printf '127.0.0.1' > "$T/data/safe-ips.txt"; run $IP_T $'oui\n'
 expect "Fichier sans fin de ligne"     grep -qx "127.0.0.1" "$T/data/safe-ips.txt"
 expect "Fichier sans fin de ligne : ajout" safelisted $IP_T
+
+# Whitelist : celle du service d'abord, même si le script est copié ailleurs (ex. dans scripts/data/)
+reset; mkdir -p "$T/svc/data"; printf '127.0.0.1\n' > "$T/svc/data/safe-ips.txt"
+echo "ExecStart=$T/svc/ban-path-explorer.sh --follow --ban --quiet" > "$T/unit"; run $IP_T $'oui\n'
+expect "Whitelist du service utilisée" grep -q "^$IP_T " "$T/svc/data/safe-ips.txt"
+expect "Whitelist locale ignorée"      bash -c "! grep -q $IP_T '$T/data/safe-ips.txt'"
+
+reset; echo "ExecStart=$T/absent/ban-path-explorer.sh --follow" > "$T/unit"; run $IP_T $'oui\n'
+expect "Service sans whitelist : repli" safelisted $IP_T
+
+reset; rm -rf "$T/data"; printf '127.0.0.1\n' > "$T/safe-ips.txt"; run $IP_T $'oui\n'
+expect "Script rangé dans data/, sans service" grep -q "^$IP_T " "$T/safe-ips.txt"
+expect "Pas de data/data créé"         test ! -e "$T/data"
+
+reset; rm -rf "$T/data"; ban $IP_T; run $IP_T $'oui\n'
+expect "Whitelist introuvable : erreur"  rc_is 2
+expect "Whitelist introuvable : message" said "introuvable"
+expect "Whitelist introuvable : IP libérée quand même" no_rule $IP_T
 
 reset; ban $IP_T; mkdir "$T/lock"; echo $$ > "$T/lock/pid"; run $IP_T $'non\n'
 expect "Verrou occupé : erreur"        rc_is 2
