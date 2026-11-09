@@ -546,6 +546,18 @@ run_ban_tests() {
   run_isolated "$out" --log-dir "$d" --ban
   ban_check "Ban #2 (signature = ban iptables immédiat)" has_rule iptables "198.51.100.20/32"
   rm -f "$d/site_access.log"
+
+  # unban-ip.sh : nombre de bans à 0 = libérée ; événements antérieurs ignorés, événements postérieurs = ban n°1
+  reset_bans
+  for i in 1 2 3 4 5 6; do acc 198.51.100.60 "$i" "GET /u$i.php" 404; done > "$d/site_access.log"
+  now=$(date +%s)
+  echo "198.51.100.60|$now|0|$now" > "$TMP_BAN_STATE"
+  run_isolated "$out" --log-dir "$d" --threshold 5 --ban
+  ban_check "Libération (événements antérieurs ignorés)" bash -c "! iptables -w -S BAN-PATH-EXPLORER | grep -q 198.51.100.60"
+  echo "198.51.100.60|$((now - 3600))|0|$((now - 3600))" > "$TMP_BAN_STATE"
+  run_isolated "$out" --log-dir "$d" --threshold 5 --ban
+  ban_check "Libération (nouveaux événements = ban n°1)" bash -c "iptables -w -S BAN-PATH-EXPLORER | grep -q 198.51.100.60 && grep -q '^198.51.100.60|[0-9]*|1|' '$TMP_BAN_STATE'"
+  rm -f "$d/site_access.log"
 }
 
 early_help_return "$@"

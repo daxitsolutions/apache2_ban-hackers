@@ -595,7 +595,7 @@ acquire_lock() {
     if is_uint "$pid_value" && kill -0 "$pid_value" >/dev/null 2>&1; then
       cmdline="$(cat "/proc/$pid_value/cmdline" 2>/dev/null || echo "")"
       case "$cmdline" in
-        *"$SCRIPT_NAME"*)
+        *"$SCRIPT_NAME"*|*unban-ip.sh*)
           RUNNING_PID="$pid_value"
           return 1
           ;;
@@ -655,6 +655,13 @@ forget_ip() {
 is_banned_for() {
   local ip="$1" last_ts="$2"
   [ -n "${ST_EXP[$ip]+x}" ] && [ "${ST_EXP[$ip]}" -gt "$NOW_TS" ] && [ "$last_ts" -le "${ST_SINCE[$ip]}" ]
+}
+
+# IP libérée à la main par unban-ip.sh (nombre de bans à 0) : ses événements antérieurs ne comptent plus.
+# ponytail: un nouvel événement réactive toute la fenêtre ; filtrer les événements par date si cela gêne
+is_released_for() {
+  local ip="$1" last_ts="$2"
+  [ "${ST_COUNT[$ip]:-1}" -eq 0 ] && [ "$last_ts" -le "${ST_SINCE[$ip]}" ]
 }
 
 cleanup_expired_bans() {
@@ -1076,6 +1083,7 @@ main() {
   if [ -s "$tmp_suspects" ]; then
     while IFS= read -r ip || [ -n "$ip" ]; do
       [ -z "$ip" ] && continue
+      [ "$BAN_ENABLED" -eq 1 ] && is_released_for "$ip" "${LAST_TS[$ip]}" && continue
       suspect_count=$((suspect_count + 1))
       if [ "$BAN_ENABLED" -eq 1 ] && is_banned_for "$ip" "${LAST_TS[$ip]}"; then
         say "IP déjà bannie : $ip (jusqu'à $(format_hm "${ST_EXP[$ip]}"), aucun nouvel événement)"

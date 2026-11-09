@@ -16,10 +16,11 @@ Boîte à outils shell pour protéger un serveur web Apache (Debian/Ubuntu, comp
 | `scripts/ban-path-explorer.sh` | Analyse les logs Apache (error + access) et **bannit** via iptables/ip6tables les IPs qui scannent le site, font du brute force ou envoient une requête d'attaque connue |
 | `scripts/audit-compromise.sh` | Après une attaque : recherche les traces de compromission (comptes, clés SSH, webshells, processus suspects…), **en lecture seule** |
 | `scripts/check-ip.sh` | Indique si une IP est bloquée et pourquoi, **en lecture seule** |
+| `scripts/unban-ip.sh` | Libère une IP bloquée et propose de l'ajouter aux IP saines |
 | `scripts/audit-email-problems.sh` | Vérifie la protection anti-usurpation d'un domaine : SPF, DMARC, DKIM, MTA-STS, TLS-RPT |
 | `config/` | Configurations testées : fail2ban, durcissement Apache et SSH, logrotate |
 
-Les scripts qui touchent au système (`ban-path-explorer.sh`, `audit-compromise.sh`, `check-ip.sh` et les tests) **doivent être lancés avec `sudo`** ; ils refusent de démarrer sinon. `audit-email-problems.sh` ne fait que des requêtes DNS et se lance sans sudo.
+Les scripts qui touchent au système (`ban-path-explorer.sh`, `audit-compromise.sh`, `check-ip.sh`, `unban-ip.sh` et les tests) **doivent être lancés avec `sudo`** ; ils refusent de démarrer sinon. `audit-email-problems.sh` ne fait que des requêtes DNS et se lance sans sudo.
 
 ---
 
@@ -146,7 +147,13 @@ Si l'IP n'est pas bloquée, ou si le résultat est indéterminé, le script prop
 
 Le journal est conservé 12 semaines : une IP bannie depuis plus longtemps n'y a plus de raison, mais son ban reste visible dans `/var/lib/ban-path-explorer/state`.
 
-**Débloquer une IP** : ajoutez-la à `scripts/data/safe-ips.txt` ; elle est débloquée au cycle suivant (≤ 5 s avec le service).
+**Débloquer une IP**
+
+```bash
+sudo ./scripts/unban-ip.sh 203.0.113.10
+```
+
+Le script libère l'IP dans `ban-path-explorer` (son compteur de récidives repart de zéro), fail2ban et CrowdSec, puis demande s'il faut l'ajouter à la liste des IP saines (`scripts/data/safe-ips.txt`). Sans cet ajout, ses requêtes déjà journalisées ne provoquent pas de nouveau ban, mais toute nouvelle requête suspecte en provoquera un. fail2ban et CrowdSec gardent leur propre whitelist. Code de retour : 0 = IP libérée ou déjà libre, 2 = erreur ou libération incomplète.
 
 **Après un redémarrage** : les bans encore valides sont réappliqués automatiquement depuis le fichier d'état.
 
@@ -196,6 +203,7 @@ docker run --rm --cap-add NET_ADMIN -e BAN_TESTS=1 -v "$PWD":/repo -w /repo debi
 ```bash
 ./scripts/test-audit-email-problems.sh
 ./scripts/test-check-ip.sh
+./scripts/test-unban-ip.sh
 ```
 
 **Mode essai du script de ban** : sans `--ban`, `ban-path-explorer.sh` ne bloque rien et affiche seulement ce qu'il ferait. C'est la façon sûre de tester un réglage (`--threshold`, `bad-patterns.txt`…) sur un serveur réel.
@@ -312,7 +320,7 @@ sudo systemctl restart ban-path-explorer
 | `Erreur : ce script doit être lancé avec sudo` | Relancez la même commande précédée de `sudo` |
 | `Ban refusé: IP privée` dans le journal | Apache est derrière un proxy : configurez `mod_remoteip` (voir plus haut) |
 | `Avertissement : log Apache non analysé` | Un vhost écrit ailleurs : ajoutez `--log-files` ou `--log-dir` dans le service |
-| Une IP légitime est bannie | Ajoutez-la à `scripts/data/safe-ips.txt` ; si c'est une signature, retirez le motif de `bad-patterns.txt` |
+| Une IP légitime est bannie | `sudo ./scripts/unban-ip.sh <ip>` et répondez `oui` pour l'ajouter aux IP saines ; si c'est une signature, retirez le motif de `bad-patterns.txt` |
 | `Aucune IP d'administration dans …safe-ips.txt` | Ajoutez votre IP d'administration dans `scripts/data/safe-ips.txt` |
 | `whitelist recréée` | `scripts/data/safe-ips.txt` était absent : il a été recréé avec `127.0.0.1`, ajoutez votre IP |
 | `ancienne whitelist encore lue` | Recopiez ses IPs dans `scripts/data/safe-ips.txt`, puis supprimez l'ancien fichier |
@@ -329,12 +337,13 @@ Shell toolkit to protect an Apache web server (Debian/Ubuntu, RHEL-compatible): 
 | `scripts/ban-path-explorer.sh` | Parses Apache error + access logs and **bans** (iptables/ip6tables) IPs that scan, brute-force, or send a known attack request |
 | `scripts/audit-compromise.sh` | Post-attack compromise indicators (accounts, SSH keys, webshells, suspicious processes…), **read-only** |
 | `scripts/check-ip.sh` | Tells whether an IP is blocked and why, **read-only** |
+| `scripts/unban-ip.sh` | Releases a blocked IP and offers to add it to the safe list |
 | `scripts/audit-email-problems.sh` | Domain anti-spoofing check: SPF, DMARC, DKIM, MTA-STS, TLS-RPT |
 | `config/` | Tested configs: fail2ban, Apache and SSH hardening, logrotate |
 
 > ⚠️ **Before the first run, add the administrator's IP to `scripts/data/safe-ips.txt`** (it only contains `127.0.0.1`). Otherwise a mistake on your side can ban you from your own server, SSH included. Do not push the completed file to a public repository.
 
-`ban-path-explorer.sh`, `audit-compromise.sh`, `check-ip.sh` and the test suite **must run with `sudo`** and refuse to start otherwise. `audit-email-problems.sh` only does DNS lookups and runs without sudo.
+`ban-path-explorer.sh`, `audit-compromise.sh`, `check-ip.sh`, `unban-ip.sh` and the test suite **must run with `sudo`** and refuse to start otherwise. `audit-email-problems.sh` only does DNS lookups and runs without sudo.
 
 ### Quick start
 
@@ -373,7 +382,7 @@ sudo iptables -S BAN-PATH-EXPLORER; sudo ip6tables -S BAN-PATH-EXPLORER
 - **Ban durations**: `--ban-duration` (60 min), then 24 h, 7 days, then 30 days for repeat offenders (remembered for 30 days).
 - **Never banned**: whitelisted IPs/ranges, the server's own addresses, private IPs (likely a reverse proxy), invalid values.
 - **Bans survive reboots**: they are re-applied from `/var/lib/ban-path-explorer/state`.
-- **Whitelist**: `scripts/data/safe-ips.txt` (IPs, CIDR ranges, `#` comments). **Unban an IP**: add it there.
+- **Whitelist**: `scripts/data/safe-ips.txt` (IPs, CIDR ranges, `#` comments). **Unban an IP**: `sudo ./scripts/unban-ip.sh <ip>` releases it (ban-path-explorer, fail2ban, CrowdSec) and asks whether to add it to the safe list; without that, any new suspicious request bans it again.
 - **Check whether an IP is blocked, and why**:
 
   ```bash
@@ -399,6 +408,7 @@ The tests never modify permanent files: the script under test runs from a tempor
 sudo ./scripts/test-ban-path-explorer.sh        # on the server: real logs (copied) + synthetic logs
 ./scripts/test-audit-email-problems.sh          # fake dig, no real DNS queries
 ./scripts/test-check-ip.sh                      # fake firewall tools, isolated copy
+./scripts/test-unban-ip.sh                      # fake firewall tools, isolated copy
 ```
 
 Full iptables tests (IPv4/IPv6 bans, repeat offenders, restore after reboot…) create real firewall rules. Run them **only in a disposable container**:

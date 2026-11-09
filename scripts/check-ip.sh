@@ -201,7 +201,9 @@ fi
 state="$(awk -F'|' -v ip="$IP" '$1 == ip { line = $2 " " $3 } END { print line }' "$BAN_STATE_FILE" 2>/dev/null)"
 read -r exp count <<< "$state"
 if [[ ${exp:-} =~ ^[0-9]+$ ]]; then
-  if [ "$exp" -gt "$(date +%s)" ]; then
+  if [ "${count:-1}" = "0" ]; then
+    echo "  Libérée manuellement le $(format_date "$exp")"
+  elif [ "$exp" -gt "$(date +%s)" ]; then
     echo "  Ban n°${count:-1}, jusqu'à $(format_date "$exp")"
   else
     echo "  Dernier ban (n°${count:-1}) expiré le $(format_date "$exp")"

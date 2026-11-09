@@ -102,6 +102,9 @@ reset; echo "203.0.113.10|1000|1|1" > "$T/state"
 check "Ban expiré"              1 "expiré le"              203.0.113.10
 check "Non bloquée"             1 "n'est pas bloquée"      203.0.113.10
 
+reset; echo "203.0.113.10|1000|0|1000" > "$T/state"
+check "Libérée à la main"       1 "Libérée manuellement"   203.0.113.10
+
 reset; echo "[['sshd', 'recidive']]" > "$T/f2b"
 check "fail2ban"                0 "jails : sshd recidive"  203.0.113.30
 
