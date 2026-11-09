@@ -15,10 +15,11 @@ Boîte à outils shell pour protéger un serveur web Apache (Debian/Ubuntu, comp
 |---|---|
 | `scripts/ban-path-explorer.sh` | Analyse les logs Apache (error + access) et **bannit** via iptables/ip6tables les IPs qui scannent le site, font du brute force ou envoient une requête d'attaque connue |
 | `scripts/audit-compromise.sh` | Après une attaque : recherche les traces de compromission (comptes, clés SSH, webshells, processus suspects…), **en lecture seule** |
+| `scripts/check-ip.sh` | Indique si une IP est bloquée et pourquoi, **en lecture seule** |
 | `scripts/audit-email-problems.sh` | Vérifie la protection anti-usurpation d'un domaine : SPF, DMARC, DKIM, MTA-STS, TLS-RPT |
 | `config/` | Configurations testées : fail2ban, durcissement Apache et SSH, logrotate |
 
-Les scripts qui touchent au système (`ban-path-explorer.sh`, `audit-compromise.sh` et les tests) **doivent être lancés avec `sudo`** ; ils refusent de démarrer sinon. `audit-email-problems.sh` ne fait que des requêtes DNS et se lance sans sudo.
+Les scripts qui touchent au système (`ban-path-explorer.sh`, `audit-compromise.sh`, `check-ip.sh` et les tests) **doivent être lancés avec `sudo`** ; ils refusent de démarrer sinon. `audit-email-problems.sh` ne fait que des requêtes DNS et se lance sans sudo.
 
 ---
 
@@ -124,6 +125,25 @@ sudo cat /var/lib/ban-path-explorer/state        # ip|expiration|nombre de bans|
 | `/var/lib/ban-path-explorer/state` | Bans actifs et historique des récidives |
 | `/var/log/ban-path-explorer.log` | Journal des bans, déblocages et avertissements |
 
+**Vérifier si une IP est bloquée, et pourquoi**
+
+```bash
+sudo ./scripts/check-ip.sh 203.0.113.10
+```
+
+Le script, en lecture seule, interroge le pare-feu, l'état des bans et le journal (archives comprises), ainsi que fail2ban et CrowdSec s'ils sont installés. Code de retour : 0 = bloquée, 1 = non bloquée, 2 = erreur ou indéterminé.
+
+| Ligne du journal | Signification |
+|---|---|
+| `IP suspecte: … unique_urls=N … paths="…"` | Scan ou brute force : N chemins différents en erreur (aperçu dans `paths`) |
+| `IP suspecte: … signature="…"` | Motif de `scripts/bad-patterns.txt` ou blocage ModSecurity, avec la requête en cause |
+| `IP bannie: … (ban n°N, … jusqu'à …)` | Ban appliqué : numéro de récidive et date de fin |
+| `Action pour …: dry-run` | Détectée sans `--ban` : aucun blocage |
+| `Ban refusé: …` | Non bloquée : whitelist, adresse du serveur, IP privée ou invalide |
+| `Déblocage expiré` / `Déblocage (whitelist)` | Le ban a été levé |
+
+Le journal est conservé 12 semaines : une IP bannie depuis plus longtemps n'y a plus de raison, mais son ban reste visible dans `/var/lib/ban-path-explorer/state`.
+
 **Débloquer une IP** : ajoutez-la à `scripts/data/safe-ips.txt` ; elle est débloquée au cycle suivant (≤ 5 s avec le service).
 
 **Après un redémarrage** : les bans encore valides sont réappliqués automatiquement depuis le fichier d'état.
@@ -173,6 +193,7 @@ docker run --rm --cap-add NET_ADMIN -e BAN_TESTS=1 -v "$PWD":/repo -w /repo debi
 
 ```bash
 ./scripts/test-audit-email-problems.sh
+./scripts/test-check-ip.sh
 ```
 
 **Mode essai du script de ban** : sans `--ban`, `ban-path-explorer.sh` ne bloque rien et affiche seulement ce qu'il ferait. C'est la façon sûre de tester un réglage (`--threshold`, `bad-patterns.txt`…) sur un serveur réel.
@@ -305,12 +326,13 @@ Shell toolkit to protect an Apache web server (Debian/Ubuntu, RHEL-compatible): 
 |---|---|
 | `scripts/ban-path-explorer.sh` | Parses Apache error + access logs and **bans** (iptables/ip6tables) IPs that scan, brute-force, or send a known attack request |
 | `scripts/audit-compromise.sh` | Post-attack compromise indicators (accounts, SSH keys, webshells, suspicious processes…), **read-only** |
+| `scripts/check-ip.sh` | Tells whether an IP is blocked and why, **read-only** |
 | `scripts/audit-email-problems.sh` | Domain anti-spoofing check: SPF, DMARC, DKIM, MTA-STS, TLS-RPT |
 | `config/` | Tested configs: fail2ban, Apache and SSH hardening, logrotate |
 
 > ⚠️ **Before the first run, add the administrator's IP to `scripts/data/safe-ips.txt`** (it only contains `127.0.0.1`). Otherwise a mistake on your side can ban you from your own server, SSH included. Do not push the completed file to a public repository.
 
-`ban-path-explorer.sh`, `audit-compromise.sh` and the test suite **must run with `sudo`** and refuse to start otherwise. `audit-email-problems.sh` only does DNS lookups and runs without sudo.
+`ban-path-explorer.sh`, `audit-compromise.sh`, `check-ip.sh` and the test suite **must run with `sudo`** and refuse to start otherwise. `audit-email-problems.sh` only does DNS lookups and runs without sudo.
 
 ### Quick start
 
@@ -350,6 +372,13 @@ sudo iptables -S BAN-PATH-EXPLORER; sudo ip6tables -S BAN-PATH-EXPLORER
 - **Never banned**: whitelisted IPs/ranges, the server's own addresses, private IPs (likely a reverse proxy), invalid values.
 - **Bans survive reboots**: they are re-applied from `/var/lib/ban-path-explorer/state`.
 - **Whitelist**: `scripts/data/safe-ips.txt` (IPs, CIDR ranges, `#` comments). **Unban an IP**: add it there.
+- **Check whether an IP is blocked, and why**:
+
+  ```bash
+  sudo ./scripts/check-ip.sh 203.0.113.10
+  ```
+
+  Read-only; checks the firewall, ban state and logs (rotated ones included), plus fail2ban and CrowdSec if installed. Exit code: 0 = blocked, 1 = not blocked, 2 = error or undetermined. In the log, `unique_urls=N … paths="…"` means a scan or brute force, `signature="…"` an attack pattern or ModSecurity block, and `Ban refusé` that the IP was not blocked (whitelisted, server address, private or invalid).
 - **Default logs**: `*error*.log`, `*access*.log`, `*error_log`, `*access_log` in `--log-dir`. A warning is shown for Apache logs that are configured but not covered.
 - **Main options**:
   - `--ban` (without it: dry run);
@@ -367,6 +396,7 @@ The tests never modify permanent files: the script under test runs from a tempor
 ```bash
 sudo ./scripts/test-ban-path-explorer.sh        # on the server: real logs (copied) + synthetic logs
 ./scripts/test-audit-email-problems.sh          # fake dig, no real DNS queries
+./scripts/test-check-ip.sh                      # fake firewall tools, isolated copy
 ```
 
 Full iptables tests (IPv4/IPv6 bans, repeat offenders, restore after reboot…) create real firewall rules. Run them **only in a disposable container**:
